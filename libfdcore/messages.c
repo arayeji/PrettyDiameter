@@ -81,23 +81,47 @@ int fd_msg_init(void)
 }
 
 /* Add Origin-Host, Origin-Realm, Origin-State-Id AVPS at the end of the message */
-int fd_msg_add_origin ( struct msg * msg, int osi )
+int fd_msg_add_origin_peer ( struct msg * msg, int osi, struct peer_info * info )
 {
 	union avp_value val;
 	struct avp * avp_OH  = NULL;
 	struct avp * avp_OR  = NULL;
 	struct avp * avp_OSI = NULL;
+	DiamId_t host;
+	size_t hostlen;
+	DiamId_t realm;
+	size_t realmlen;
 
-	TRACE_ENTRY("%p", msg);
+	TRACE_ENTRY("%p %p", msg, info);
 	CHECK_PARAMS(  msg  );
+
+	if (info && info->config.pic_local_host
+			&& fd_peer_use_presentation_identity(info)) {
+		host = info->config.pic_local_host;
+		hostlen = strlen(host);
+	} else {
+		host = fd_g_config->cnf_diamid;
+		hostlen = fd_g_config->cnf_diamid_len;
+	}
+
+	if (info && info->config.pic_local_realm
+			&& fd_peer_use_presentation_identity(info)) {
+		realm = info->config.pic_local_realm;
+		realmlen = strlen(realm);
+	} else {
+		realm = fd_g_config->cnf_diamrlm;
+		realmlen = fd_g_config->cnf_diamrlm_len;
+	}
+
+	CHECK_PARAMS(host && hostlen && realm && realmlen);
 
 	/* Create the Origin-Host AVP */
 	CHECK_FCT( fd_msg_avp_new( dict_avp_OH, 0, &avp_OH ) );
 
 	/* Set its value */
 	memset(&val, 0, sizeof(val));
-	val.os.data = (os0_t)fd_g_config->cnf_diamid;
-	val.os.len  = fd_g_config->cnf_diamid_len;
+	val.os.data = (os0_t)host;
+	val.os.len  = hostlen;
 	CHECK_FCT( fd_msg_avp_setvalue( avp_OH, &val ) );
 
 	/* Add it to the message */
@@ -109,8 +133,8 @@ int fd_msg_add_origin ( struct msg * msg, int osi )
 
 	/* Set its value */
 	memset(&val, 0, sizeof(val));
-	val.os.data = (os0_t)fd_g_config->cnf_diamrlm;
-	val.os.len  = fd_g_config->cnf_diamrlm_len;
+	val.os.data = (os0_t)realm;
+	val.os.len  = realmlen;
 	CHECK_FCT( fd_msg_avp_setvalue( avp_OR, &val ) );
 
 	/* Add it to the message */
@@ -130,6 +154,11 @@ int fd_msg_add_origin ( struct msg * msg, int osi )
 	}
 
 	return 0;
+}
+
+int fd_msg_add_origin ( struct msg * msg, int osi )
+{
+	return fd_msg_add_origin_peer(msg, osi, NULL);
 }
 
 /* Create a new Session-Id and add at the beginning of the message. */

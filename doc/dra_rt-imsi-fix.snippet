@@ -1,0 +1,9 @@
+# IMSI-prefix overrides (rt_default) — use when MME sends one DR for all subscribers
+# but you must steer by User-Name (IMSI) prefix.
+
+# Roaming IMSI range → partner DRA, not local HSS
+# un=["^99901"] : "hss.example.net" += -250 ;
+# un=["^99901"] : "dra-roam.example.net" += 250 ;
+
+# Home IMSI range → local HSS
+# un=["^99902"] : "hss.example.net" += 250 ;

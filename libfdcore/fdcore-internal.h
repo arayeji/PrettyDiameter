@@ -304,6 +304,14 @@ int fd_out_send(struct msg ** msg, struct cnxctx * cnx, struct fd_peer * peer, i
 int fd_out_start(struct fd_peer * peer);
 int fd_out_stop(struct fd_peer * peer);
 
+/* Use per-peer LocalHost/LocalRealm in CER/CEA (only when SrcIP or SrcPort is set) */
+int fd_peer_use_presentation_identity( struct peer_info * info );
+
+/* True if diamid matches global Identity or any ConnectPeer LocalHost */
+int fd_identity_is_local( DiamId_t diamid, size_t diamidlen );
+/* True if realm matches global Realm or any ConnectPeer LocalRealm */
+int fd_realm_is_local( DiamId_t realm, size_t realmlen );
+
 /* Initiating connections */
 int fd_p_cnx_init(struct fd_peer * peer);
 void fd_p_cnx_abort(struct fd_peer * peer, int cleanup_all);
@@ -344,7 +352,7 @@ struct cnxctx * fd_cnx_serv_sctp(uint16_t port, struct fd_list * ep_list);
 int             fd_cnx_serv_listen(struct cnxctx * conn);
 struct cnxctx * fd_cnx_serv_accept(struct cnxctx * serv);
 struct cnxctx * fd_cnx_cli_connect_tcp(sSA * sa, socklen_t addrlen);
-struct cnxctx * fd_cnx_cli_connect_sctp(int no_ip6, uint16_t port, struct fd_list * list, struct fd_list * src_list);
+struct cnxctx * fd_cnx_cli_connect_sctp(int no_ip6, uint16_t port, struct fd_list * list, struct fd_list * src_list, uint16_t src_port);
 int             fd_cnx_start_clear(struct cnxctx * conn, int loop);
 void		fd_cnx_sethostname(struct cnxctx * conn, DiamId_t hn);
 int		fd_cnx_proto_info(struct cnxctx * conn, char * buf, size_t len);

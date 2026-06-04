@@ -518,9 +518,12 @@ psm_loop:
 		/* If it is an answer, associate with the request or drop */
 		if (!(hdr->msg_flags & CMD_FLAG_REQUEST)) {
 			struct msg * req;
-			/* Search matching request (same hbhid) */
+			DiamId_t qry_src = NULL;
+			/* Search matching request (same hbhid) on this peer connection */
 			CHECK_FCT_DO( fd_p_sr_fetch(&peer->p_sr, hdr->msg_hbhid, &req), goto psm_end );
 			if (req == NULL) {
+				TRACE_DEBUG(FULL, "Answer cmd %u hbh 0x%x from peer '%s': no pending request on this connection",
+					hdr->msg_code, hdr->msg_hbhid, peer->p_hdr.info.pi_diamid);
 				fd_hook_call(HOOK_MESSAGE_DROPPED, msg, peer, "Answer received with no corresponding sent request.", fd_msg_pmdl_get(msg));
 				fd_msg_free(msg);
 				goto psm_loop;

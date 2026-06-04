@@ -1,0 +1,10 @@
+# Destination-Realm routing examples for rt_default (LoadExtension rt_default.fdx)
+# Replace realm and peer Diameter-Ids with your deployment.
+
+# Home PLMN A → local HSS
+DR = "epc.mnc001.mcc999.3gppnetwork.org" : "hss-a.example.net" += 100 ;
+DR = "epc.mnc001.mcc999.3gppnetwork.org" : "dra-b.example.net" += -200 ;
+
+# Roaming PLMN B → partner DRA, not local HSS
+DR = "epc.mnc002.mcc999.3gppnetwork.org" : "hss-a.example.net" += -250 ;
+DR = "epc.mnc002.mcc999.3gppnetwork.org" : "dra-roam.example.net" += 250 ;

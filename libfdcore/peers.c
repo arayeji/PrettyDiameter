@@ -69,6 +69,7 @@ int fd_peer_alloc(struct fd_peer ** ptr)
 	fd_list_init(&p->p_hdr.chain, p);
 	
 	fd_list_init(&p->p_hdr.info.pi_endpoints, p);
+	fd_list_init(&p->p_hdr.info.pi_src_endpoints, p);
 	fd_list_init(&p->p_hdr.info.runtime.pir_apps, p);
 	
 	p->p_eyec = EYEC_PEER;
@@ -86,6 +87,67 @@ int fd_peer_alloc(struct fd_peer ** ptr)
 	CHECK_POSIX( pthread_cond_init(&p->p_sr.cnd, NULL) );
 	
 	fd_list_init(&p->p_connparams, p);
+	
+	return 0;
+}
+
+/* Per-link presentation identity (MCI whitelist): only with outbound SCTP SrcIP/SrcPort */
+int fd_peer_use_presentation_identity( struct peer_info * info )
+{
+	if (!info)
+		return 0;
+	if (!info->config.pic_local_host && !info->config.pic_local_realm)
+		return 0;
+	return (info->config.pic_src_port != 0)
+		|| !FD_IS_LIST_EMPTY(&info->pi_src_endpoints);
+}
+
+/* Return 1 if this Diameter identity is hosted locally (global Identity or per-peer LocalHost) */
+int fd_identity_is_local( DiamId_t diamid, size_t diamidlen )
+{
+	struct fd_list * li;
+	
+	TRACE_ENTRY("%p %zu", diamid, diamidlen);
+	CHECK_PARAMS( diamid && diamidlen );
+	
+	if (!fd_os_almostcasesrch(diamid, diamidlen, fd_g_config->cnf_diamid, fd_g_config->cnf_diamid_len, NULL))
+		return 1;
+	
+	CHECK_FCT( pthread_rwlock_rdlock(&fd_g_peers_rw) );
+	for (li = fd_g_peers.next; li != &fd_g_peers; li = li->next) {
+		struct fd_peer * p = (struct fd_peer *)li;
+		DiamId_t lh = p->p_hdr.info.config.pic_local_host;
+		if (lh && !fd_os_almostcasesrch(diamid, diamidlen, lh, strlen(lh), NULL)) {
+			CHECK_FCT( pthread_rwlock_unlock(&fd_g_peers_rw) );
+			return 1;
+		}
+	}
+	CHECK_FCT( pthread_rwlock_unlock(&fd_g_peers_rw) );
+	
+	return 0;
+}
+
+/* Return 1 if this realm is hosted locally (global Realm or per-peer LocalRealm) */
+int fd_realm_is_local( DiamId_t realm, size_t realmlen )
+{
+	struct fd_list * li;
+	
+	TRACE_ENTRY("%p %zu", realm, realmlen);
+	CHECK_PARAMS( realm && realmlen );
+	
+	if (!fd_os_almostcasesrch(realm, realmlen, fd_g_config->cnf_diamrlm, fd_g_config->cnf_diamrlm_len, NULL))
+		return 1;
+	
+	CHECK_FCT( pthread_rwlock_rdlock(&fd_g_peers_rw) );
+	for (li = fd_g_peers.next; li != &fd_g_peers; li = li->next) {
+		struct fd_peer * p = (struct fd_peer *)li;
+		DiamId_t lr = p->p_hdr.info.config.pic_local_realm;
+		if (lr && !fd_os_almostcasesrch(realm, realmlen, lr, strlen(lr), NULL)) {
+			CHECK_FCT( pthread_rwlock_unlock(&fd_g_peers_rw) );
+			return 1;
+		}
+	}
+	CHECK_FCT( pthread_rwlock_unlock(&fd_g_peers_rw) );
 	
 	return 0;
 }
@@ -123,6 +185,12 @@ int fd_peer_add ( struct peer_info * info, const char * orig_dbg, void (*cb)(str
 	if (info->config.pic_priority) {
 		CHECK_MALLOC( p->p_hdr.info.config.pic_priority = strdup(info->config.pic_priority) );
 	}
+	if (info->config.pic_local_host) {
+		CHECK_MALLOC( p->p_hdr.info.config.pic_local_host = strdup(info->config.pic_local_host) );
+	}
+	if (info->config.pic_local_realm) {
+		CHECK_MALLOC( p->p_hdr.info.config.pic_local_realm = strdup(info->config.pic_local_realm) );
+	}
 	
 	/* Move the list of endpoints into the peer */
 	if (info->pi_endpoints.next)
@@ -130,6 +198,14 @@ int fd_peer_add ( struct peer_info * info, const char * orig_dbg, void (*cb)(str
 			li = info->pi_endpoints.next;
 			fd_list_unlink(li);
 			fd_list_insert_before(&p->p_hdr.info.pi_endpoints, li);
+		}
+	
+	/* Move the list of outbound SCTP source endpoints into the peer */
+	if (info->pi_src_endpoints.next)
+		while (!FD_IS_LIST_EMPTY( &info->pi_src_endpoints ) ) {
+			li = info->pi_src_endpoints.next;
+			fd_list_unlink(li);
+			fd_list_insert_before(&p->p_hdr.info.pi_src_endpoints, li);
 		}
 	
 	/* The internal data */
@@ -332,6 +408,8 @@ int fd_peer_free(struct fd_peer ** ptr)
 	free_null(p->p_hdr.info.pi_diamid);
 	
 	free_null(p->p_hdr.info.config.pic_realm); 
+	free_null(p->p_hdr.info.config.pic_local_host);
+	free_null(p->p_hdr.info.config.pic_local_realm);
 	free_null(p->p_hdr.info.config.pic_priority); 
 	
 	free_null(p->p_hdr.info.runtime.pir_realm);
@@ -339,6 +417,7 @@ int fd_peer_free(struct fd_peer ** ptr)
 	free_list( &p->p_hdr.info.runtime.pir_apps );
 	
 	free_list( &p->p_hdr.info.pi_endpoints );
+	free_list( &p->p_hdr.info.pi_src_endpoints );
 	
 	free_null(p->p_dbgorig);
 	

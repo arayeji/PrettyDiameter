@@ -1,15 +1,22 @@
-syntax: glob
-*.orig
-*.rej
+# Build artifacts
+build/
+*.o
+*.a
+*.so
+*.fdx
+CMakeCache.txt
+CMakeFiles/
+
+# Deploy bundles and captures (may contain operator data)
+fd-deploy.tgz
+*.pcap
+*.pcapng
+
+# Editor / local
+*.swp
 *~
-*.log
-*.sum
-.cache/
-.hg
-build*
-compile_commands.json
-test.*
-GPATH
-GRTAGS
-GTAGS
-.vscode
+.vscode/
+.idea/
+
+# Separate lab tooling (not part of PrettyDiameter release)
+tools/iwf-src/

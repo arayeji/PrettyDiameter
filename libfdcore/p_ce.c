@@ -83,7 +83,11 @@ void fd_p_ce_clear_cnx(struct fd_peer * peer, struct cnxctx ** cnx_kept)
 /* Election: compare the Diameter Ids by lexical order, return true if the election is won */
 static __inline__ int election_result(struct fd_peer * peer)
 {
-	int ret = (strcasecmp(peer->p_hdr.info.pi_diamid, fd_g_config->cnf_diamid) < 0);
+	DiamId_t local_id = fd_g_config->cnf_diamid;
+	if (fd_peer_use_presentation_identity(&peer->p_hdr.info)
+			&& peer->p_hdr.info.config.pic_local_host)
+		local_id = peer->p_hdr.info.config.pic_local_host;
+	int ret = (strcasecmp(peer->p_hdr.info.pi_diamid, local_id) < 0);
 	if (ret) {
 		TRACE_DEBUG(INFO, "Election WON against peer '%s'", peer->p_hdr.info.pi_diamid);
 	} else {
@@ -93,21 +97,32 @@ static __inline__ int election_result(struct fd_peer * peer)
 }
 
 /* Add AVPs about local information in a CER or CEA */
-static int add_CE_info(struct msg *msg, struct cnxctx * cnx, int isi_tls, int isi_none)
+static int add_CE_info(struct msg *msg, struct cnxctx * cnx, struct fd_peer * peer, int isi_tls, int isi_none)
 {
 	struct dict_object * dictobj = NULL;
 	struct avp * avp = NULL;
 	union avp_value val;
 	struct fd_list *li;
+	struct fd_list * host_ips = &fd_g_config->cnf_endpoints;
 	
 	/* Add the Origin-* AVPs */
-	CHECK_FCT( fd_msg_add_origin ( msg, 1 ) );
+	if (peer) {
+		CHECK_FCT( fd_msg_add_origin_peer ( msg, 1, &peer->p_hdr.info ) );
+	} else {
+		CHECK_FCT( fd_msg_add_origin ( msg, 1 ) );
+	}
+	
+	/* Host-IP-Address: per-peer SrcIP list when non-empty, else global ListenOn */
+	if (peer && !FD_IS_LIST_EMPTY(&peer->p_hdr.info.pi_src_endpoints))
+		host_ips = &peer->p_hdr.info.pi_src_endpoints;
+	if (FD_IS_LIST_EMPTY(host_ips))
+		host_ips = &fd_g_config->cnf_endpoints;
 	
 	/* Find the model for Host-IP-Address AVP */
 	CHECK_FCT(  fd_dict_search( fd_g_config->cnf_dict, DICT_AVP, AVP_BY_NAME, "Host-IP-Address", &dictobj, ENOENT )  );
 		
 	/* Add the AVP(s) -- not sure what is the purpose... We could probably only add the primary one ? */
-	for (li = fd_g_config->cnf_endpoints.next; li != &fd_g_config->cnf_endpoints; li = li->next) {
+	for (li = host_ips->next; li != host_ips; li = li->next) {
 		struct fd_endpoint * ep = (struct fd_endpoint *)li;
 		CHECK_FCT( fd_msg_avp_new ( dictobj, 0, &avp ) );
 		CHECK_FCT( fd_msg_avp_value_encode ( &ep->ss, avp ) );
@@ -623,7 +638,7 @@ static int create_CER(struct fd_peer * peer, struct cnxctx * cnx, struct msg ** 
 	}
 	
 	/* Add the information about the local peer */
-	CHECK_FCT( add_CE_info(*cer, cnx, isi_tls, isi_none) );
+	CHECK_FCT( add_CE_info(*cer, cnx, peer, isi_tls, isi_none) );
 	
 	/* Done! */
 	return 0;
@@ -657,7 +672,7 @@ static void receiver_reject(struct cnxctx ** recv_cnx, struct msg ** cer, struct
 		CHECK_FCT_DO( fd_msg_add_origin ( *cer, 1 ), goto destroy );
 	} else {
 		/* Add other AVPs to be compliant with the ABNF */
-		CHECK_FCT_DO( add_CE_info(*cer, *recv_cnx, 0, 0), goto destroy );
+		CHECK_FCT_DO( add_CE_info(*cer, *recv_cnx, NULL, 0, 0), goto destroy );
 	}
 	CHECK_FCT_DO( fd_out_send(cer, *recv_cnx, NULL, 0), goto destroy );
 	
@@ -1004,7 +1019,7 @@ int fd_p_ce_process_receiver(struct fd_peer * peer)
 	/* Reply a CEA */
 	CHECK_FCT( fd_msg_new_answer_from_req ( fd_g_config->cnf_dict, &msg, 0 ) );
 	CHECK_FCT( fd_msg_rescode_set(msg, "DIAMETER_SUCCESS", NULL, NULL, 0 ) );
-	CHECK_FCT( add_CE_info(msg, peer->p_cnxctx, isi & PI_SEC_TLS_OLD, isi & PI_SEC_NONE) );
+	CHECK_FCT( add_CE_info(msg, peer->p_cnxctx, peer, isi & PI_SEC_TLS_OLD, isi & PI_SEC_NONE) );
 	
 	/* The connection is complete, but we may still need TLS handshake */
 	fd_hook_call(HOOK_PEER_CONNECT_SUCCESS, msg, peer, NULL, NULL);

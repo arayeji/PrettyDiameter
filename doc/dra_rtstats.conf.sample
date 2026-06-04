@@ -1,0 +1,31 @@
+# dra_rtstats — HTTP counters for Diameter relay traffic
+# Load in freeDiameter.conf:
+#   LoadExtension = "/usr/local/lib/freeDiameter/dra_rtstats.fdx" : "/etc/freeDiameter/dra_rtstats.conf";
+
+Port = 8088;
+
+# Optional friendly names (substring match, case-insensitive on peer / realm)
+realm_label = "mnc001" : "Operator-A";
+realm_label = "mnc002" : "Operator-B";
+
+# Optional friendly link names (substring match on ConnectPeer Diameter-Id)
+peer_label = "hss" : "HSS";
+peer_label = "mme" : "MME";
+peer_label = "dra-peer-a" : "DRA-A";
+
+# route_match = "label" | CRITERIA | "target-peer-diamid" ;
+# CRITERIA keywords (same as rt_default): *  un=  dr=  dh=  oh=  or=
+# Target must match ConnectPeer identity exactly.
+
+# Example: count traffic toward a home HSS by realm
+# route_match = "to-hss-home" | dr=["mnc001.mcc999"] | "hss.example.net";
+
+# Example: count relay toward MME when Dest-Realm matches
+# route_match = "to-mme" | dr=["mnc002.mcc999"] | "mme.example.net";
+
+# Optional: rewrite Destination-Host before routing-out (e.g. presented name → real MME peer)
+# dh_replace = "dra-presented.example.net" : "mme.example.net";
+
+# Automatic rows (no config needed):
+#   (unmatched) — no route_match rule matched the message
+#   (no peer)   — every candidate had score < 0 (will fail with 3002)

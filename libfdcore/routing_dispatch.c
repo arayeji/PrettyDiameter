@@ -630,7 +630,7 @@ static int msg_rt_in(struct msg * msg)
 								}
 							} );
 						ASSERT( ahdr->avp_value );
-						/* Compare the Destination-Host AVP of the message with our identity */
+						/* Local delivery only for global Identity (not ConnectPeer LocalHost) */
 						if (!fd_os_almostcasesrch(ahdr->avp_value->os.data, ahdr->avp_value->os.len, fd_g_config->cnf_diamid, fd_g_config->cnf_diamid_len, NULL)) {
 							is_dest_host = YES;
 						} else {
@@ -654,7 +654,6 @@ static int msg_rt_in(struct msg * msg)
 							} );
 						ASSERT( ahdr->avp_value );
 						dr_val = ahdr->avp_value;
-						/* Compare the Destination-Realm AVP of the message with our identity */
 						if (!fd_os_almostcasesrch(dr_val->os.data, dr_val->os.len, fd_g_config->cnf_diamrlm, fd_g_config->cnf_diamrlm_len, NULL)) {
 							is_dest_realm = YES;
 						} else {
@@ -697,7 +696,7 @@ static int msg_rt_in(struct msg * msg)
 								}
 							} );
 						ASSERT( ahdr->avp_value );
-						/* Is this our own name ? */
+						/* Loop detection uses global Identity only (not per-peer LocalHost) */
 						if (!fd_os_almostcasesrch(ahdr->avp_value->os.data, ahdr->avp_value->os.len, fd_g_config->cnf_diamid, fd_g_config->cnf_diamid_len, NULL)) {
 							/* Yes: then we must return DIAMETER_LOOP_DETECTED according to Diameter RFC */
 							char * error = "DIAMETER_LOOP_DETECTED";
@@ -728,18 +727,21 @@ static int msg_rt_in(struct msg * msg)
 			return 0;
 		}
 
-		/* If we are listed as Destination-Host */
-		if (is_dest_host == YES) {
-			if (is_local_app == YES) {
-				/* Ok, give the message to the dispatch thread */
-				fd_hook_call(HOOK_MESSAGE_ROUTING_LOCAL, msgptr, NULL, NULL, fd_msg_pmdl_get(msgptr));
-				CHECK_FCT( fd_fifo_post(fd_g_local, &msgptr) );
-			} else {
-				/* We don't support the application, reply an error */
+		/* If we are listed as Destination-Host and host the application locally */
+		if (is_dest_host == YES && is_local_app == YES) {
+			fd_hook_call(HOOK_MESSAGE_ROUTING_LOCAL, msgptr, NULL, NULL, fd_msg_pmdl_get(msgptr));
+			CHECK_FCT( fd_fifo_post(fd_g_local, &msgptr) );
+			return 0;
+		}
+
+		/* Relay: Dest-Host is our Identity but we do not implement this app — forward, do not answer 3007 */
+		if (is_dest_host == YES && is_local_app == NO) {
+			if (fd_g_config->cnf_flags.no_fwd) {
 				fd_hook_call(HOOK_MESSAGE_PARSING_ERROR, msgptr, NULL, "Application unsupported", fd_msg_pmdl_get(msgptr));
 				CHECK_FCT( return_error( &msgptr, "DIAMETER_APPLICATION_UNSUPPORTED", NULL, NULL) );
+				return 0;
 			}
-			return 0;
+			/* fall through to relay forwarding */
 		}
 
 		/* If the message is explicitly for someone else */
@@ -866,6 +868,37 @@ static int msg_rt_in(struct msg * msg)
 }
 		
 
+/* Return peer for relay answers: msg_src_id, else first Route-Record from the saved request */
+static int qry_return_peer(struct msg *qry, DiamId_t *out, size_t *outlen)
+{
+	struct avp * avp;
+	struct avp_hdr * ahdr;
+
+	TRACE_ENTRY("%p %p %p", qry, out, outlen);
+	CHECK_PARAMS(qry && out && outlen);
+
+	CHECK_FCT( fd_msg_source_get(qry, out, outlen) );
+	if (*out && *outlen)
+		return 0;
+
+	CHECK_FCT( fd_msg_browse(qry, MSG_BRW_FIRST_CHILD, &avp, NULL) );
+	while (avp) {
+		CHECK_FCT( fd_msg_avp_hdr(avp, &ahdr) );
+		if (!(ahdr->avp_flags & AVP_FLAG_VENDOR) && (ahdr->avp_code == AC_ROUTE_RECORD) && ahdr->avp_value) {
+			*out = (DiamId_t)ahdr->avp_value->os.data;
+			*outlen = ahdr->avp_value->os.len;
+			TRACE_DEBUG(FULL, "Relay answer: msg_src missing, using Route-Record '%.*s' as return peer",
+				(int)*outlen, *out);
+			return 0;
+		}
+		CHECK_FCT( fd_msg_browse(avp, MSG_BRW_NEXT, &avp, NULL) );
+	}
+
+	*out = NULL;
+	*outlen = 0;
+	return 0;
+}
+
 /* The ROUTING-OUT message processing */
 static int msg_rt_out(struct msg * msg)
 {
@@ -892,15 +925,25 @@ static int msg_rt_out(struct msg * msg)
 
 		/* Retrieve the corresponding query and its origin */
 		CHECK_FCT( fd_msg_answ_getq( msgptr, &qry ) );
-		CHECK_FCT( fd_msg_source_get( qry, &qry_src, &qry_src_len ) );
+		CHECK_FCT( qry_return_peer(qry, &qry_src, &qry_src_len) );
 
-		ASSERT( qry_src ); /* if it is NULL, the message should have been in the LOCAL queue! */
+		if (!qry_src || !qry_src_len) {
+			TRACE_DEBUG(FULL, "Routing-OUT answer cmd %u: no return peer (msg_src and Route-Record missing on pending request)",
+				hdr->msg_code);
+			fd_hook_call(HOOK_MESSAGE_ROUTING_ERROR, msgptr, NULL,
+				"Relay answer has no return peer", fd_msg_pmdl_get(msgptr));
+			fd_hook_call(HOOK_MESSAGE_DROPPED, msgptr, NULL,
+				"Relay answer has no return peer", fd_msg_pmdl_get(msgptr));
+			fd_msg_free(msgptr);
+			return 0;
+		}
 
 		/* Find the peer corresponding to this name */
 		CHECK_FCT( fd_peer_getbyid( qry_src, qry_src_len, 0, (void *) &peer ) );
 		if (fd_peer_getstate(peer) != STATE_OPEN && fd_peer_getstate(peer) != STATE_CLOSING_GRACE) {
 			char buf[128];
 			snprintf(buf, sizeof(buf), "Unable to forward answer to deleted / closed peer '%s'.", qry_src);
+			TRACE_DEBUG(FULL, "Routing-OUT answer cmd %u: %s", hdr->msg_code, buf);
 			fd_hook_call(HOOK_MESSAGE_ROUTING_ERROR, msgptr, NULL, buf, fd_msg_pmdl_get(msgptr));
 			fd_hook_call(HOOK_MESSAGE_DROPPED, msgptr, NULL, buf, fd_msg_pmdl_get(msgptr));
 			fd_msg_free(msgptr);
@@ -910,6 +953,8 @@ static int msg_rt_out(struct msg * msg)
 		/* We must restore the hop-by-hop id */
 		CHECK_FCT( fd_msg_hdr(qry, &qry_hdr) );
 		hdr->msg_hbhid = qry_hdr->msg_hbhid;
+
+		TRACE_DEBUG(FULL, "Routing-OUT answer cmd %u hbh 0x%x: sending to peer '%s'", hdr->msg_code, hdr->msg_hbhid, qry_src);
 
 		/* Push the message into this peer */
 		CHECK_FCT( fd_out_send(&msgptr, NULL, peer, 1) );
@@ -1027,6 +1072,8 @@ static int msg_rt_out(struct msg * msg)
 
 		if (fd_peer_getstate(peer) == STATE_OPEN) {
 			/* Send to this one */
+			TRACE_DEBUG(FULL, "Routing-OUT request cmd %u: sending to peer '%s' (source '%s')",
+				hdr->msg_code, peer->p_hdr.info.pi_diamid, qry_src ?: "(none)");
 			CHECK_FCT_DO( fd_out_send(&msgptr, NULL, peer, 1), continue );
 			
 			/* If the sending was successful */
@@ -1125,7 +1172,7 @@ static void * process_thr(void * arg, int (*action_cb)(struct msg * msg), struct
 			CHECK_FCT_DO( ret, goto fatal_error );
 		}
 		
-		LOG_A("%s: Picked next message", action_name);
+		TRACE_DEBUG(ANNOYING, "%s: Picked next message", action_name);
 
 		/* Now process the message */
 		CHECK_FCT_DO( (*action_cb)(msg), goto fatal_error);

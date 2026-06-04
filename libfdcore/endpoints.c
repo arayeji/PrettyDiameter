@@ -34,6 +34,71 @@
 *********************************************************************************************************/
 
 #include "fdcore-internal.h"
+#include <ifaddrs.h>
+
+
+/* Return 0 if the address is configured locally or assigned to a host interface */
+int fd_ep_is_local( sSA * sa, socklen_t sl, struct fd_list * conf_eps )
+{
+	struct ifaddrs *iflist, *cur;
+	struct fd_list * li;
+	union {
+		sSA * sa;
+		sSA4 *sin;
+		sSA6 *sin6;
+	} ptr, ifa;
+	int cmp;
+	
+	TRACE_ENTRY("%p %u %p", sa, sl, conf_eps);
+	CHECK_PARAMS( sa && (sl <= sizeof(sSS)) );
+	
+	ptr.sa = sa;
+	
+	/* Match against ListenOn / other configured local endpoints */
+	if (conf_eps && conf_eps->next) {
+		for (li = conf_eps->next; li != conf_eps; li = li->next) {
+			struct fd_endpoint * ep = (struct fd_endpoint *)li;
+			if (ep->sa.sa_family != sa->sa_family)
+				continue;
+			switch (sa->sa_family) {
+				case AF_INET:
+					cmp = memcmp(&ep->sin.sin_addr, &ptr.sin->sin_addr, sizeof(struct in_addr));
+					break;
+				case AF_INET6:
+					cmp = memcmp(&ep->sin6.sin6_addr, &ptr.sin6->sin6_addr, sizeof(struct in6_addr));
+					break;
+				default:
+					cmp = -1;
+			}
+			if (cmp == 0)
+				return 0;
+		}
+	}
+	
+	CHECK_SYS( getifaddrs(&iflist) );
+	for (cur = iflist; cur != NULL; cur = cur->ifa_next) {
+		if (!cur->ifa_addr || cur->ifa_addr->sa_family != sa->sa_family)
+			continue;
+		ifa.sa = cur->ifa_addr;
+		switch (sa->sa_family) {
+			case AF_INET:
+				cmp = memcmp(&ptr.sin->sin_addr, &ifa.sin->sin_addr, sizeof(struct in_addr));
+				break;
+			case AF_INET6:
+				cmp = memcmp(&ptr.sin6->sin6_addr, &ifa.sin6->sin6_addr, sizeof(struct in6_addr));
+				break;
+			default:
+				cmp = -1;
+		}
+		if (cmp == 0) {
+			freeifaddrs(iflist);
+			return 0;
+		}
+	}
+	freeifaddrs(iflist);
+	
+	return ENOENT;
+}
 
 
 /* Add an endpoint information in a list */

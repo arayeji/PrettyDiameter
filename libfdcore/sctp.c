@@ -889,7 +889,7 @@ int fd_sctp_listen( int sock )
 }
 
 /* Create a client socket and connect to remote server */
-int fd_sctp_client( int *sock, int no_ip6, uint16_t port, struct fd_list * list, struct fd_list * src_list )
+int fd_sctp_client( int *sock, int no_ip6, uint16_t port, struct fd_list * list, struct fd_list * src_list, uint16_t src_port )
 {
 	int family;
 	union {
@@ -903,7 +903,7 @@ int fd_sctp_client( int *sock, int no_ip6, uint16_t port, struct fd_list * list,
 	
 	sar.buf = NULL;
 	
-	TRACE_ENTRY("%p %i %hu %p %p", sock, no_ip6, port, list, src_list);
+	TRACE_ENTRY("%p %i %hu %p %p %hu", sock, no_ip6, port, list, src_list, src_port);
 	CHECK_PARAMS( sock && list && (!FD_IS_LIST_EMPTY(list)) );
 	CHECK_PARAMS( !src_list || (src_list && (!FD_IS_LIST_EMPTY(src_list))) );
 	
@@ -922,30 +922,54 @@ int fd_sctp_client( int *sock, int no_ip6, uint16_t port, struct fd_list * list,
 	/* Set the socket options */
 	CHECK_FCT_DO( ret = fd_setsockopt_prebind(*sock), goto out );
 
-	/* Bind to explicit source addresses if requested */
-	if (src_list && !FD_IS_LIST_EMPTY(src_list)) {
-		sSA * bindsar = NULL; /* array of addresses */
-		size_t sz = 0; /* size of the array */
-		int sarcount = 0; /* number of sock addr in the array */
+	/* Bind local endpoint(s) before connect when a source port and/or address list is set */
+	if ((src_list && !FD_IS_LIST_EMPTY(src_list)) || src_port) {
+		uint16_t bind_port = src_port ? htons(src_port) : 0;
 
-		/* Create the array of configured addresses */
-		CHECK_FCT_DO( ret = add_addresses_from_list_mask((void *)&bindsar, &sz, &sarcount, family, 0, src_list, EP_FL_CONF, EP_FL_CONF), goto out );
+		if (src_list && !FD_IS_LIST_EMPTY(src_list)) {
+			sSA * bindsar = NULL; /* array of addresses */
+			size_t sz = 0; /* size of the array */
+			int sarcount = 0; /* number of sock addr in the array */
 
-		if (sarcount) {
-			char * buf = NULL;
-			size_t len = 0;
-			CHECK_MALLOC_DO( fd_sa_dump_array( &buf, &len, 0, bindsar, sarcount), goto out );
-			LOG_A("SCTP client binding local addresses: %s", buf);
-			free(buf);
+			/* Create the array of configured addresses */
+			CHECK_FCT_DO( ret = add_addresses_from_list_mask((void *)&bindsar, &sz, &sarcount, family, bind_port, src_list, EP_FL_CONF, EP_FL_CONF), goto out );
 
-			CHECK_SYS_DO( ret = sctp_bindx(*sock, bindsar, sarcount, SCTP_BINDX_ADD_ADDR), goto out );
+			if (sarcount) {
+				char * buf = NULL;
+				size_t len = 0;
+				CHECK_MALLOC_DO( fd_sa_dump_array( &buf, &len, 0, bindsar, sarcount), goto out );
+				LOG_A("SCTP client binding local addresses: %s", buf);
+				free(buf);
+
+				CHECK_SYS_DO( ret = sctp_bindx(*sock, bindsar, sarcount, SCTP_BINDX_ADD_ADDR),
+					{ LOG_E("SCTP client sctp_bindx failed: %s", strerror(errno)); goto out; } );
+			}
+
+			/* Disable ASCONF option in postbind */
+			bind_default = 0;
+
+			/* We don't need bindsar anymore */
+			free(bindsar);
+		} else {
+			/* Fixed source port only: bind the wildcard local address with that port */
+			union {
+				sSS  ss;
+				sSA  sa;
+				sSA4 sin;
+				sSA6 sin6;
+			} s;
+
+			memset(&s, 0, sizeof(s));
+			s.sa.sa_family = family;
+			if (family == AF_INET)
+				s.sin.sin_port = bind_port;
+			else
+				s.sin6.sin6_port = bind_port;
+
+			CHECK_SYS_DO( ret = bind(*sock, &s.sa, sSAlen(&s.ss)),
+				{ LOG_E("SCTP client bind to port %hu failed: %s", src_port, strerror(errno)); goto out; } );
+			LOG_A("SCTP client bound local port %hu", src_port);
 		}
-
-		/* Disable ASCONF option in postbind */
-		bind_default = 0;
-
-		/* We don't need bindsar anymore */
-		free(bindsar);
 	}
 
 	/* Create the array of addresses, add first the configured addresses, then the discovered, then the other ones */

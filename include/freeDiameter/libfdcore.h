@@ -290,6 +290,9 @@ struct peer_info {
 		
 		DiamId_t	pic_realm;	/* If configured, the daemon will check the received realm in CER/CEA matches this. */
 		uint16_t	pic_port; 	/* port to connect to. 0: default. */
+		uint16_t	pic_src_port;	/* local SCTP source port for outbound connect. 0: ephemeral. */
+		DiamId_t	pic_local_host;	/* Origin-Host on this link when SrcIP/SrcPort set; else global Identity. */
+		DiamId_t	pic_local_realm;	/* Origin-Realm on this link when SrcIP/SrcPort set; else global Realm. */
 		
 		uint32_t 	pic_lft;	/* lifetime of this peer when inactive (see pic_flags.exp definition) */
 		int		pic_tctimer; 	/* use this value for TcTimer instead of global, if != 0 */
@@ -326,6 +329,7 @@ struct peer_info {
 	} runtime;	/* Data populated after connection, may change between 2 connections -- not used by fd_peer_add */
 	
 	struct fd_list	pi_endpoints;	/* Endpoint(s) of the remote peer (configured, discovered, or advertised). list of struct fd_endpoint. DNS resolved if empty. */
+	struct fd_list	pi_src_endpoints; /* Local address(es) for outbound SCTP bind (ConnectPeer SrcIP). Empty: use global ListenOn / default. */
 };
 
 
@@ -600,6 +604,8 @@ int fd_msg_rescode_set( struct msg * msg, char * rescode, char * errormsg, struc
 
 /* Add Origin-Host, Origin-Realm, (if osi) Origin-State-Id AVPS at the end of the message */
 int fd_msg_add_origin ( struct msg * msg, int osi ); 
+/* Same, using per-peer LocalHost / LocalRealm when set (see ConnectPeer); else global Identity / Realm */
+int fd_msg_add_origin_peer ( struct msg * msg, int osi, struct peer_info * info );
 
 /* Generate a new Session-Id and add it at the beginning of the message (opt is added at the end of the sid if provided) */
 int fd_msg_new_session( struct msg * msg, os0_t opt, size_t optlen );
@@ -906,6 +912,8 @@ struct fd_endpoint {
 };
 
 int fd_ep_add_merge( struct fd_list * list, sSA * sa, socklen_t sl, uint32_t flags );
+/* Return 0 if sa is assigned to a local interface (getifaddrs) or listed in conf endpoints */
+int fd_ep_is_local( sSA * sa, socklen_t sl, struct fd_list * conf_eps );
 int fd_ep_filter( struct fd_list * list, uint32_t flags );
 int fd_ep_filter_family( struct fd_list * list, int af );
 int fd_ep_clearflags( struct fd_list * list, uint32_t flags );

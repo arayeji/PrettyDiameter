@@ -121,6 +121,27 @@ static int prepare_connection_list(struct fd_peer * peer)
 					AF_INET));
 	}
 	
+	/* Filter configured outbound SCTP source addresses the same way */
+	if (!FD_IS_LIST_EMPTY(&peer->p_hdr.info.pi_src_endpoints)) {
+		if (peer->p_hdr.info.config.pic_flags.pro3) {
+			CHECK_FCT( fd_ep_filter_family(
+						&peer->p_hdr.info.pi_src_endpoints,
+						(peer->p_hdr.info.config.pic_flags.pro3 == PI_P3_IP) ?
+							AF_INET
+							: AF_INET6));
+		}
+		if (fd_g_config->cnf_flags.no_ip4) {
+			CHECK_FCT( fd_ep_filter_family(
+						&peer->p_hdr.info.pi_src_endpoints,
+						AF_INET6));
+		}
+		if (fd_g_config->cnf_flags.no_ip6) {
+			CHECK_FCT( fd_ep_filter_family(
+						&peer->p_hdr.info.pi_src_endpoints,
+						AF_INET));
+		}
+	}
+	
 	/* We don't use the alternate addresses that were sent by the remote peer */
 	CHECK_FCT( fd_ep_clearflags(&peer->p_hdr.info.pi_endpoints, EP_FL_ADV) );
 	
@@ -266,10 +287,22 @@ static void * connect_thr(void * arg)
 				break;
 #ifndef DISABLE_SCTP			
 			case IPPROTO_SCTP:
-				cnx = fd_cnx_cli_connect_sctp((peer->p_hdr.info.config.pic_flags.pro3 == PI_P3_IP) ? 1 : fd_g_config->cnf_flags.no_ip6, 
+			{
+				struct fd_list * src_list = NULL;
+				uint16_t src_port = peer->p_hdr.info.config.pic_src_port;
+
+				if (!FD_IS_LIST_EMPTY(&peer->p_hdr.info.pi_src_endpoints)) {
+					/* Per-peer SrcIP overrides global ListenOn for this association */
+					src_list = &peer->p_hdr.info.pi_src_endpoints;
+				} else if (!src_port && !fd_g_config->cnf_flags.no_bind) {
+					src_list = &fd_g_config->cnf_endpoints;
+				}
+
+				cnx = fd_cnx_cli_connect_sctp((peer->p_hdr.info.config.pic_flags.pro3 == PI_P3_IP) ? 1 : fd_g_config->cnf_flags.no_ip6,
 							nc->port, &peer->p_hdr.info.pi_endpoints,
-							fd_g_config->cnf_flags.no_bind ? NULL : &fd_g_config->cnf_endpoints);
+							src_list, src_port);
 				break;
+			}
 #endif /* DISABLE_SCTP */
 		}
 		

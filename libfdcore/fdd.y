@@ -122,6 +122,10 @@ struct peer_info fddpi;
 %token		LOADEXT
 %token		CONNPEER
 %token		CONNTO
+%token		SRCPORT
+%token		SRCIP
+%token		LOCALHOST
+%token		LOCALREALM
 %token		TLS_CRED
 %token		TLS_CA
 %token		TLS_CRL
@@ -489,10 +493,11 @@ extconf:		/* empty */
 			}
 			;
 			
-connpeer:		{
+connpeer:					{
 				memset(&fddpi, 0, sizeof(fddpi));
 				fddpi.config.pic_flags.persist = PI_PRST_ALWAYS;
 				fd_list_init( &fddpi.pi_endpoints, NULL );
+				fd_list_init( &fddpi.pi_src_endpoints, NULL );
 			}
 			CONNPEER '=' QSTRING peerinfo ';'
 			{
@@ -503,9 +508,16 @@ connpeer:		{
 				/* Now destroy any content in the structure */
 				free(fddpi.pi_diamid);
 				free(fddpi.config.pic_realm);
+				free(fddpi.config.pic_local_host);
+				free(fddpi.config.pic_local_realm);
 				free(fddpi.config.pic_priority);
 				while (!FD_IS_LIST_EMPTY(&fddpi.pi_endpoints)) {
 					struct fd_list * li = fddpi.pi_endpoints.next;
+					fd_list_unlink(li);
+					free(li);
+				}
+				while (!FD_IS_LIST_EMPTY(&fddpi.pi_src_endpoints)) {
+					struct fd_list * li = fddpi.pi_src_endpoints.next;
 					fd_list_unlink(li);
 					free(li);
 				}
@@ -582,6 +594,52 @@ peerparams:		/* empty */
 				CHECK_PARAMS_DO( ($4 > 0) && ($4 < 1<<16),
 					{ yyerror (&yylloc, conf, "Invalid port value"); YYERROR; } );
 				fddpi.config.pic_port = (uint16_t)$4;
+			}
+			| peerparams SRCPORT '=' INTEGER ';'
+			{
+				CHECK_PARAMS_DO( ($4 > 0) && ($4 < 1<<16),
+					{ yyerror (&yylloc, conf, "Invalid SrcPort value (must be 1..65535)"); YYERROR; } );
+				fddpi.config.pic_src_port = (uint16_t)$4;
+			}
+			| peerparams SRCIP '=' QSTRING ';'
+			{
+				struct addrinfo hints, *ai;
+				int ret;
+				
+				memset(&hints, 0, sizeof(hints));
+				hints.ai_flags = AI_NUMERICHOST;
+				ret = getaddrinfo($4, NULL, &hints, &ai);
+				if (ret) { yyerror (&yylloc, conf, gai_strerror(ret)); YYERROR; }
+				
+				ret = fd_ep_is_local(ai->ai_addr, ai->ai_addrlen, &conf->cnf_endpoints);
+				if (ret) {
+					yyerror (&yylloc, conf, "SrcIP is not a local address of this host");
+					freeaddrinfo(ai);
+					free($4);
+					YYERROR;
+				}
+				
+				CHECK_FCT_DO( fd_ep_add_merge( &fddpi.pi_src_endpoints, ai->ai_addr, ai->ai_addrlen, EP_FL_CONF ), YYERROR );
+				free($4);
+				freeaddrinfo(ai);
+			}
+			| peerparams LOCALHOST '=' QSTRING ';'
+			{
+				if (!fd_os_is_valid_DiameterIdentity((os0_t)$4, strlen($4))) {
+					yyerror (&yylloc, conf, "Invalid LocalHost (not a valid DiameterIdentity)");
+					free($4);
+					YYERROR;
+				}
+				fddpi.config.pic_local_host = $4;
+			}
+			| peerparams LOCALREALM '=' QSTRING ';'
+			{
+				if (!fd_os_is_valid_DiameterIdentity((os0_t)$4, strlen($4))) {
+					yyerror (&yylloc, conf, "Invalid LocalRealm (not a valid DiameterIdentity)");
+					free($4);
+					YYERROR;
+				}
+				fddpi.config.pic_local_realm = $4;
 			}
 			| peerparams TCTIMER '=' INTEGER ';'
 			{

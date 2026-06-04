@@ -1,0 +1,9 @@
+# When Destination-Host names the MME but DR= rules also boost HSS, add explicit DH rules.
+# Example: remote sends DH=dra-presented.example.net but ConnectPeer for MME is mme.example.net
+
+# DH = "dra-presented.example.net" : "hss.example.net" += NO_DELIVERY ;
+# DH = "dra-presented.example.net" : "mme.example.net" += FINALDEST ;
+
+# If ConnectPeer id matches DH (mme.example.net), prefer blocking HSS on that DH:
+# DH = "mme.example.net" : "hss.example.net" += NO_DELIVERY ;
+# DH = "mme.example.net" : "mme.example.net" += 20 ;

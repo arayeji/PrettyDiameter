@@ -98,7 +98,7 @@ int main(int argc, char *argv[])
 	CHECK( 0, fd_sctp_listen( sock ));
 	
 	/* Now, create the client socket */
-	CHECK( 0, fd_sctp_client( &cli.cc_socket, 0, TEST_PORT, &eps, NULL ));
+	CHECK( 0, fd_sctp_client( &cli.cc_socket, 0, TEST_PORT, &eps, NULL, 0 ));
 	
 	/* Accept this connection */
 	srv.cc_socket = accept(sock, NULL, NULL);

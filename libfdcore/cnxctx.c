@@ -331,8 +331,9 @@ struct cnxctx * fd_cnx_cli_connect_tcp(sSA * sa /* contains the port already */,
 }
 
 /* Same for SCTP, accepts a list of remote addresses to connect to (see sctp_connectx for how they are used).
- * If src_list is not NULL and not empty, list of local addresses to connect from via sctp_bindx(). */
-struct cnxctx * fd_cnx_cli_connect_sctp(int no_ip6, uint16_t port, struct fd_list * list, struct fd_list * src_list)
+ * If src_list is not NULL and not empty, list of local addresses to connect from via sctp_bindx().
+ * If src_port is non-zero, bind that local port (with src_list addresses, or wildcard if src_list is empty). */
+struct cnxctx * fd_cnx_cli_connect_sctp(int no_ip6, uint16_t port, struct fd_list * list, struct fd_list * src_list, uint16_t src_port)
 {
 #ifdef DISABLE_SCTP
 	TRACE_DEBUG(INFO, "This function should never be called when SCTP is disabled...");
@@ -345,7 +346,7 @@ struct cnxctx * fd_cnx_cli_connect_sctp(int no_ip6, uint16_t port, struct fd_lis
 	char sa_buf[sSA_DUMP_STRLEN];
 	sSS primary;
 
-	TRACE_ENTRY("%p %p", list, src_list);
+	TRACE_ENTRY("%p %p %hu", list, src_list, src_port);
 	CHECK_PARAMS_DO( list && !FD_IS_LIST_EMPTY(list), return NULL );
 
 	/* Log SCTP association source and destination endpoints */
@@ -359,6 +360,9 @@ struct cnxctx * fd_cnx_cli_connect_sctp(int no_ip6, uint16_t port, struct fd_lis
 		} else {
 			CHECK_MALLOC_DO( fd_dump_extend( &buf, &len, &offset, "(ANY)"), );
 		}
+		if (src_port) {
+			CHECK_MALLOC_DO( fd_dump_extend( &buf, &len, &offset, " port:%hu", src_port), );
+		}
 		CHECK_MALLOC_DO( fd_dump_extend( &buf, &len, &offset, ", destination: "), );
 		CHECK_MALLOC_DO( fd_ep_dump( &buf, &len, &offset, 0, 0, list ), );
 		LOG_D("%s", buf ?: "Error determining SCTP endpoints");
@@ -370,7 +374,7 @@ struct cnxctx * fd_cnx_cli_connect_sctp(int no_ip6, uint16_t port, struct fd_lis
 	LOG_D("Connecting to SCTP %s:%hu...", sa_buf, port);
 
 	{
-		int ret = fd_sctp_client( &sock, no_ip6, port, list, src_list );
+		int ret = fd_sctp_client( &sock, no_ip6, port, list, src_list, src_port );
 		if (ret != 0) {
 			LOG_D("SCTP connection to [%s,...] failed: %s", sa_buf, strerror(ret));
 			return NULL;

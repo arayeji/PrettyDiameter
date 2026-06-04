@@ -177,7 +177,7 @@ int fd_p_dp_initiate(struct fd_peer * peer, char * reason)
 	CHECK_FCT( fd_msg_new ( fd_dict_cmd_DPR, MSGFL_ALLOC_ETEID, &msg ) );
 	
 	/* Add the Origin information */
-	CHECK_FCT( fd_msg_add_origin ( msg, 0 ) );
+	CHECK_FCT( fd_msg_add_origin_peer ( msg, 0, &peer->p_hdr.info ) );
 	
 	/* Add the Disconnect-Cause */
 	CHECK_FCT( fd_msg_avp_new ( fd_dict_avp_DC, 0, &avp ) );

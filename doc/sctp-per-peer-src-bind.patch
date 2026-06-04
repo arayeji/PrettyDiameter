@@ -1,0 +1,725 @@
+﻿diff --git a/include/freeDiameter/libfdcore.h b/include/freeDiameter/libfdcore.h
+index 25b5975..e3ddff8 100644
+--- a/include/freeDiameter/libfdcore.h
++++ b/include/freeDiameter/libfdcore.h
+@@ -290,6 +290,9 @@ struct peer_info {
+ 		
+ 		DiamId_t	pic_realm;	/* If configured, the daemon will check the received realm in CER/CEA matches this. */
+ 		uint16_t	pic_port; 	/* port to connect to. 0: default. */
++		uint16_t	pic_src_port;	/* local SCTP source port for outbound connect. 0: ephemeral. */
++		DiamId_t	pic_local_host;	/* Origin-Host for this peer link; NULL: use global Identity. */
++		DiamId_t	pic_local_realm;	/* Origin-Realm for this peer link; NULL: use global Realm. */
+ 		
+ 		uint32_t 	pic_lft;	/* lifetime of this peer when inactive (see pic_flags.exp definition) */
+ 		int		pic_tctimer; 	/* use this value for TcTimer instead of global, if != 0 */
+@@ -326,6 +329,7 @@ struct peer_info {
+ 	} runtime;	/* Data populated after connection, may change between 2 connections -- not used by fd_peer_add */
+ 	
+ 	struct fd_list	pi_endpoints;	/* Endpoint(s) of the remote peer (configured, discovered, or advertised). list of struct fd_endpoint. DNS resolved if empty. */
++	struct fd_list	pi_src_endpoints; /* Local address(es) for outbound SCTP bind (ConnectPeer SrcIP). Empty: use global ListenOn / default. */
+ };
+ 
+ 
+@@ -600,6 +604,8 @@ int fd_msg_rescode_set( struct msg * msg, char * rescode, char * errormsg, struc
+ 
+ /* Add Origin-Host, Origin-Realm, (if osi) Origin-State-Id AVPS at the end of the message */
+ int fd_msg_add_origin ( struct msg * msg, int osi ); 
++/* Same, using per-peer LocalHost / LocalRealm when set (see ConnectPeer); else global Identity / Realm */
++int fd_msg_add_origin_peer ( struct msg * msg, int osi, struct peer_info * info );
+ 
+ /* Generate a new Session-Id and add it at the beginning of the message (opt is added at the end of the sid if provided) */
+ int fd_msg_new_session( struct msg * msg, os0_t opt, size_t optlen );
+@@ -906,6 +912,8 @@ struct fd_endpoint {
+ };
+ 
+ int fd_ep_add_merge( struct fd_list * list, sSA * sa, socklen_t sl, uint32_t flags );
++/* Return 0 if sa is assigned to a local interface (getifaddrs) or listed in conf endpoints */
++int fd_ep_is_local( sSA * sa, socklen_t sl, struct fd_list * conf_eps );
+ int fd_ep_filter( struct fd_list * list, uint32_t flags );
+ int fd_ep_filter_family( struct fd_list * list, int af );
+ int fd_ep_clearflags( struct fd_list * list, uint32_t flags );
+diff --git a/libfdcore/cnxctx.c b/libfdcore/cnxctx.c
+index a9cdb71..7653dfa 100644
+--- a/libfdcore/cnxctx.c
++++ b/libfdcore/cnxctx.c
+@@ -331,8 +331,9 @@ struct cnxctx * fd_cnx_cli_connect_tcp(sSA * sa /* contains the port already */,
+ }
+ 
+ /* Same for SCTP, accepts a list of remote addresses to connect to (see sctp_connectx for how they are used).
+- * If src_list is not NULL and not empty, list of local addresses to connect from via sctp_bindx(). */
+-struct cnxctx * fd_cnx_cli_connect_sctp(int no_ip6, uint16_t port, struct fd_list * list, struct fd_list * src_list)
++ * If src_list is not NULL and not empty, list of local addresses to connect from via sctp_bindx().
++ * If src_port is non-zero, bind that local port (with src_list addresses, or wildcard if src_list is empty). */
++struct cnxctx * fd_cnx_cli_connect_sctp(int no_ip6, uint16_t port, struct fd_list * list, struct fd_list * src_list, uint16_t src_port)
+ {
+ #ifdef DISABLE_SCTP
+ 	TRACE_DEBUG(INFO, "This function should never be called when SCTP is disabled...");
+@@ -345,7 +346,7 @@ struct cnxctx * fd_cnx_cli_connect_sctp(int no_ip6, uint16_t port, struct fd_lis
+ 	char sa_buf[sSA_DUMP_STRLEN];
+ 	sSS primary;
+ 
+-	TRACE_ENTRY("%p %p", list, src_list);
++	TRACE_ENTRY("%p %p %hu", list, src_list, src_port);
+ 	CHECK_PARAMS_DO( list && !FD_IS_LIST_EMPTY(list), return NULL );
+ 
+ 	/* Log SCTP association source and destination endpoints */
+@@ -359,6 +360,9 @@ struct cnxctx * fd_cnx_cli_connect_sctp(int no_ip6, uint16_t port, struct fd_lis
+ 		} else {
+ 			CHECK_MALLOC_DO( fd_dump_extend( &buf, &len, &offset, "(ANY)"), );
+ 		}
++		if (src_port) {
++			CHECK_MALLOC_DO( fd_dump_extend( &buf, &len, &offset, " port:%hu", src_port), );
++		}
+ 		CHECK_MALLOC_DO( fd_dump_extend( &buf, &len, &offset, ", destination: "), );
+ 		CHECK_MALLOC_DO( fd_ep_dump( &buf, &len, &offset, 0, 0, list ), );
+ 		LOG_D("%s", buf ?: "Error determining SCTP endpoints");
+@@ -370,7 +374,7 @@ struct cnxctx * fd_cnx_cli_connect_sctp(int no_ip6, uint16_t port, struct fd_lis
+ 	LOG_D("Connecting to SCTP %s:%hu...", sa_buf, port);
+ 
+ 	{
+-		int ret = fd_sctp_client( &sock, no_ip6, port, list, src_list );
++		int ret = fd_sctp_client( &sock, no_ip6, port, list, src_list, src_port );
+ 		if (ret != 0) {
+ 			LOG_D("SCTP connection to [%s,...] failed: %s", sa_buf, strerror(ret));
+ 			return NULL;
+diff --git a/libfdcore/cnxctx.h b/libfdcore/cnxctx.h
+index 43c8630..b4cae57 100644
+--- a/libfdcore/cnxctx.h
++++ b/libfdcore/cnxctx.h
+@@ -114,7 +114,7 @@ int fd_tcp_get_remote_ep(int sock, sSS * ss, socklen_t *sl);
+ /* SCTP */
+ int fd_sctp_create_bind_server( int * sock, int family, struct fd_list * list, uint16_t port );
+ int fd_sctp_listen( int sock );
+-int fd_sctp_client( int *sock, int no_ip6, uint16_t port, struct fd_list * list, struct fd_list * src_list );
++int fd_sctp_client( int *sock, int no_ip6, uint16_t port, struct fd_list * list, struct fd_list * src_list, uint16_t src_port );
+ int fd_sctp_get_local_ep(int sock,  struct fd_list * list);
+ int fd_sctp_get_remote_ep(int sock, struct fd_list * list);
+ int fd_sctp_get_str_info( int sock, uint16_t *in, uint16_t *out, sSS *primary );
+diff --git a/libfdcore/endpoints.c b/libfdcore/endpoints.c
+index e80c2a3..8bc499d 100644
+--- a/libfdcore/endpoints.c
++++ b/libfdcore/endpoints.c
+@@ -34,6 +34,71 @@
+ *********************************************************************************************************/
+ 
+ #include "fdcore-internal.h"
++#include <ifaddrs.h>
++
++
++/* Return 0 if the address is configured locally or assigned to a host interface */
++int fd_ep_is_local( sSA * sa, socklen_t sl, struct fd_list * conf_eps )
++{
++	struct ifaddrs *iflist, *cur;
++	struct fd_list * li;
++	union {
++		sSA * sa;
++		sSA4 *sin;
++		sSA6 *sin6;
++	} ptr, ifa;
++	int cmp;
++	
++	TRACE_ENTRY("%p %u %p", sa, sl, conf_eps);
++	CHECK_PARAMS( sa && (sl <= sizeof(sSS)) );
++	
++	ptr.sa = sa;
++	
++	/* Match against ListenOn / other configured local endpoints */
++	if (conf_eps && conf_eps->next) {
++		for (li = conf_eps->next; li != conf_eps; li = li->next) {
++			struct fd_endpoint * ep = (struct fd_endpoint *)li;
++			if (ep->sa.sa_family != sa->sa_family)
++				continue;
++			switch (sa->sa_family) {
++				case AF_INET:
++					cmp = memcmp(&ep->sin.sin_addr, &ptr.sin->sin_addr, sizeof(struct in_addr));
++					break;
++				case AF_INET6:
++					cmp = memcmp(&ep->sin6.sin6_addr, &ptr.sin6->sin6_addr, sizeof(struct in6_addr));
++					break;
++				default:
++					cmp = -1;
++			}
++			if (cmp == 0)
++				return 0;
++		}
++	}
++	
++	CHECK_SYS( getifaddrs(&iflist) );
++	for (cur = iflist; cur != NULL; cur = cur->ifa_next) {
++		if (!cur->ifa_addr || cur->ifa_addr->sa_family != sa->sa_family)
++			continue;
++		ifa.sa = cur->ifa_addr;
++		switch (sa->sa_family) {
++			case AF_INET:
++				cmp = memcmp(&ptr.sin->sin_addr, &ifa.sin->sin_addr, sizeof(struct in_addr));
++				break;
++			case AF_INET6:
++				cmp = memcmp(&ptr.sin6->sin6_addr, &ifa.sin6->sin6_addr, sizeof(struct in6_addr));
++				break;
++			default:
++				cmp = -1;
++		}
++		if (cmp == 0) {
++			freeifaddrs(iflist);
++			return 0;
++		}
++	}
++	freeifaddrs(iflist);
++	
++	return ENOENT;
++}
+ 
+ 
+ /* Add an endpoint information in a list */
+diff --git a/libfdcore/fdcore-internal.h b/libfdcore/fdcore-internal.h
+index cc3c67a..1bda8f7 100644
+--- a/libfdcore/fdcore-internal.h
++++ b/libfdcore/fdcore-internal.h
+@@ -344,7 +344,7 @@ struct cnxctx * fd_cnx_serv_sctp(uint16_t port, struct fd_list * ep_list);
+ int             fd_cnx_serv_listen(struct cnxctx * conn);
+ struct cnxctx * fd_cnx_serv_accept(struct cnxctx * serv);
+ struct cnxctx * fd_cnx_cli_connect_tcp(sSA * sa, socklen_t addrlen);
+-struct cnxctx * fd_cnx_cli_connect_sctp(int no_ip6, uint16_t port, struct fd_list * list, struct fd_list * src_list);
++struct cnxctx * fd_cnx_cli_connect_sctp(int no_ip6, uint16_t port, struct fd_list * list, struct fd_list * src_list, uint16_t src_port);
+ int             fd_cnx_start_clear(struct cnxctx * conn, int loop);
+ void		fd_cnx_sethostname(struct cnxctx * conn, DiamId_t hn);
+ int		fd_cnx_proto_info(struct cnxctx * conn, char * buf, size_t len);
+diff --git a/libfdcore/fdd.l b/libfdcore/fdd.l
+index bac2c85..0c24b2e 100644
+--- a/libfdcore/fdd.l
++++ b/libfdcore/fdd.l
+@@ -269,6 +269,10 @@ nomatch:
+ (?i:"LoadExtension")	{ return LOADEXT; }
+ (?i:"ConnectPeer")	{ return CONNPEER; }
+ (?i:"ConnectTo")	{ return CONNTO; }
++(?i:"SrcPort")		{ return SRCPORT; }
++(?i:"SrcIP")		{ return SRCIP; }
++(?i:"LocalHost")	{ return LOCALHOST; }
++(?i:"LocalRealm")	{ return LOCALREALM; }
+ (?i:"No_TLS")		{ return NOTLS; }
+ (?i:"TLS_Cred")		{ return TLS_CRED; }
+ (?i:"TLS_CA")		{ return TLS_CA; }
+diff --git a/libfdcore/fdd.y b/libfdcore/fdd.y
+index 5f18ed6..6b70282 100644
+--- a/libfdcore/fdd.y
++++ b/libfdcore/fdd.y
+@@ -122,6 +122,10 @@ struct peer_info fddpi;
+ %token		LOADEXT
+ %token		CONNPEER
+ %token		CONNTO
++%token		SRCPORT
++%token		SRCIP
++%token		LOCALHOST
++%token		LOCALREALM
+ %token		TLS_CRED
+ %token		TLS_CA
+ %token		TLS_CRL
+@@ -489,10 +493,11 @@ extconf:		/* empty */
+ 			}
+ 			;
+ 			
+-connpeer:		{
++connpeer:					{
+ 				memset(&fddpi, 0, sizeof(fddpi));
+ 				fddpi.config.pic_flags.persist = PI_PRST_ALWAYS;
+ 				fd_list_init( &fddpi.pi_endpoints, NULL );
++				fd_list_init( &fddpi.pi_src_endpoints, NULL );
+ 			}
+ 			CONNPEER '=' QSTRING peerinfo ';'
+ 			{
+@@ -503,12 +508,19 @@ connpeer:		{
+ 				/* Now destroy any content in the structure */
+ 				free(fddpi.pi_diamid);
+ 				free(fddpi.config.pic_realm);
++				free(fddpi.config.pic_local_host);
++				free(fddpi.config.pic_local_realm);
+ 				free(fddpi.config.pic_priority);
+ 				while (!FD_IS_LIST_EMPTY(&fddpi.pi_endpoints)) {
+ 					struct fd_list * li = fddpi.pi_endpoints.next;
+ 					fd_list_unlink(li);
+ 					free(li);
+ 				}
++				while (!FD_IS_LIST_EMPTY(&fddpi.pi_src_endpoints)) {
++					struct fd_list * li = fddpi.pi_src_endpoints.next;
++					fd_list_unlink(li);
++					free(li);
++				}
+ 			}
+ 			;
+ 			
+@@ -583,6 +595,52 @@ peerparams:		/* empty */
+ 					{ yyerror (&yylloc, conf, "Invalid port value"); YYERROR; } );
+ 				fddpi.config.pic_port = (uint16_t)$4;
+ 			}
++			| peerparams SRCPORT '=' INTEGER ';'
++			{
++				CHECK_PARAMS_DO( ($4 > 0) && ($4 < 1<<16),
++					{ yyerror (&yylloc, conf, "Invalid SrcPort value (must be 1..65535)"); YYERROR; } );
++				fddpi.config.pic_src_port = (uint16_t)$4;
++			}
++			| peerparams SRCIP '=' QSTRING ';'
++			{
++				struct addrinfo hints, *ai;
++				int ret;
++				
++				memset(&hints, 0, sizeof(hints));
++				hints.ai_flags = AI_NUMERICHOST;
++				ret = getaddrinfo($4, NULL, &hints, &ai);
++				if (ret) { yyerror (&yylloc, conf, gai_strerror(ret)); YYERROR; }
++				
++				ret = fd_ep_is_local(ai->ai_addr, ai->ai_addrlen, &conf->cnf_endpoints);
++				if (ret) {
++					yyerror (&yylloc, conf, "SrcIP is not a local address of this host");
++					freeaddrinfo(ai);
++					free($4);
++					YYERROR;
++				}
++				
++				CHECK_FCT_DO( fd_ep_add_merge( &fddpi.pi_src_endpoints, ai->ai_addr, ai->ai_addrlen, EP_FL_CONF ), YYERROR );
++				free($4);
++				freeaddrinfo(ai);
++			}
++			| peerparams LOCALHOST '=' QSTRING ';'
++			{
++				if (!fd_os_is_valid_DiameterIdentity((os0_t)$4, strlen($4))) {
++					yyerror (&yylloc, conf, "Invalid LocalHost (not a valid DiameterIdentity)");
++					free($4);
++					YYERROR;
++				}
++				fddpi.config.pic_local_host = $4;
++			}
++			| peerparams LOCALREALM '=' QSTRING ';'
++			{
++				if (!fd_os_is_valid_DiameterIdentity((os0_t)$4, strlen($4))) {
++					yyerror (&yylloc, conf, "Invalid LocalRealm (not a valid DiameterIdentity)");
++					free($4);
++					YYERROR;
++				}
++				fddpi.config.pic_local_realm = $4;
++			}
+ 			| peerparams TCTIMER '=' INTEGER ';'
+ 			{
+ 				fddpi.config.pic_tctimer = $4;
+diff --git a/libfdcore/messages.c b/libfdcore/messages.c
+index 92b855c..b5ce83a 100644
+--- a/libfdcore/messages.c
++++ b/libfdcore/messages.c
+@@ -81,23 +81,45 @@ int fd_msg_init(void)
+ }
+ 
+ /* Add Origin-Host, Origin-Realm, Origin-State-Id AVPS at the end of the message */
+-int fd_msg_add_origin ( struct msg * msg, int osi )
++int fd_msg_add_origin_peer ( struct msg * msg, int osi, struct peer_info * info )
+ {
+ 	union avp_value val;
+ 	struct avp * avp_OH  = NULL;
+ 	struct avp * avp_OR  = NULL;
+ 	struct avp * avp_OSI = NULL;
++	DiamId_t host;
++	size_t hostlen;
++	DiamId_t realm;
++	size_t realmlen;
+ 
+-	TRACE_ENTRY("%p", msg);
++	TRACE_ENTRY("%p %p", msg, info);
+ 	CHECK_PARAMS(  msg  );
+ 
++	if (info && info->config.pic_local_host) {
++		host = info->config.pic_local_host;
++		hostlen = strlen(host);
++	} else {
++		host = fd_g_config->cnf_diamid;
++		hostlen = fd_g_config->cnf_diamid_len;
++	}
++
++	if (info && info->config.pic_local_realm) {
++		realm = info->config.pic_local_realm;
++		realmlen = strlen(realm);
++	} else {
++		realm = fd_g_config->cnf_diamrlm;
++		realmlen = fd_g_config->cnf_diamrlm_len;
++	}
++
++	CHECK_PARAMS(host && hostlen && realm && realmlen);
++
+ 	/* Create the Origin-Host AVP */
+ 	CHECK_FCT( fd_msg_avp_new( dict_avp_OH, 0, &avp_OH ) );
+ 
+ 	/* Set its value */
+ 	memset(&val, 0, sizeof(val));
+-	val.os.data = (os0_t)fd_g_config->cnf_diamid;
+-	val.os.len  = fd_g_config->cnf_diamid_len;
++	val.os.data = (os0_t)host;
++	val.os.len  = hostlen;
+ 	CHECK_FCT( fd_msg_avp_setvalue( avp_OH, &val ) );
+ 
+ 	/* Add it to the message */
+@@ -109,8 +131,8 @@ int fd_msg_add_origin ( struct msg * msg, int osi )
+ 
+ 	/* Set its value */
+ 	memset(&val, 0, sizeof(val));
+-	val.os.data = (os0_t)fd_g_config->cnf_diamrlm;
+-	val.os.len  = fd_g_config->cnf_diamrlm_len;
++	val.os.data = (os0_t)realm;
++	val.os.len  = realmlen;
+ 	CHECK_FCT( fd_msg_avp_setvalue( avp_OR, &val ) );
+ 
+ 	/* Add it to the message */
+@@ -132,6 +154,11 @@ int fd_msg_add_origin ( struct msg * msg, int osi )
+ 	return 0;
+ }
+ 
++int fd_msg_add_origin ( struct msg * msg, int osi )
++{
++	return fd_msg_add_origin_peer(msg, osi, NULL);
++}
++
+ /* Create a new Session-Id and add at the beginning of the message. */
+ int fd_msg_new_session( struct msg * msg, os0_t opt, size_t optlen )
+ {
+diff --git a/libfdcore/p_ce.c b/libfdcore/p_ce.c
+index 13cb0a5..98bf351 100644
+--- a/libfdcore/p_ce.c
++++ b/libfdcore/p_ce.c
+@@ -83,7 +83,8 @@ void fd_p_ce_clear_cnx(struct fd_peer * peer, struct cnxctx ** cnx_kept)
+ /* Election: compare the Diameter Ids by lexical order, return true if the election is won */
+ static __inline__ int election_result(struct fd_peer * peer)
+ {
+-	int ret = (strcasecmp(peer->p_hdr.info.pi_diamid, fd_g_config->cnf_diamid) < 0);
++	DiamId_t local_id = peer->p_hdr.info.config.pic_local_host ?: fd_g_config->cnf_diamid;
++	int ret = (strcasecmp(peer->p_hdr.info.pi_diamid, local_id) < 0);
+ 	if (ret) {
+ 		TRACE_DEBUG(INFO, "Election WON against peer '%s'", peer->p_hdr.info.pi_diamid);
+ 	} else {
+@@ -93,21 +94,30 @@ static __inline__ int election_result(struct fd_peer * peer)
+ }
+ 
+ /* Add AVPs about local information in a CER or CEA */
+-static int add_CE_info(struct msg *msg, struct cnxctx * cnx, int isi_tls, int isi_none)
++static int add_CE_info(struct msg *msg, struct cnxctx * cnx, struct fd_peer * peer, int isi_tls, int isi_none)
+ {
+ 	struct dict_object * dictobj = NULL;
+ 	struct avp * avp = NULL;
+ 	union avp_value val;
+ 	struct fd_list *li;
++	struct fd_list * host_ips = &fd_g_config->cnf_endpoints;
+ 	
+ 	/* Add the Origin-* AVPs */
+-	CHECK_FCT( fd_msg_add_origin ( msg, 1 ) );
++	if (peer) {
++		CHECK_FCT( fd_msg_add_origin_peer ( msg, 1, &peer->p_hdr.info ) );
++	} else {
++		CHECK_FCT( fd_msg_add_origin ( msg, 1 ) );
++	}
++	
++	/* Host-IP-Address: per-peer SrcIP list when set, else global ListenOn */
++	if (peer && peer->p_hdr.info.pi_src_endpoints.next)
++		host_ips = &peer->p_hdr.info.pi_src_endpoints;
+ 	
+ 	/* Find the model for Host-IP-Address AVP */
+ 	CHECK_FCT(  fd_dict_search( fd_g_config->cnf_dict, DICT_AVP, AVP_BY_NAME, "Host-IP-Address", &dictobj, ENOENT )  );
+ 		
+ 	/* Add the AVP(s) -- not sure what is the purpose... We could probably only add the primary one ? */
+-	for (li = fd_g_config->cnf_endpoints.next; li != &fd_g_config->cnf_endpoints; li = li->next) {
++	for (li = host_ips->next; li != host_ips; li = li->next) {
+ 		struct fd_endpoint * ep = (struct fd_endpoint *)li;
+ 		CHECK_FCT( fd_msg_avp_new ( dictobj, 0, &avp ) );
+ 		CHECK_FCT( fd_msg_avp_value_encode ( &ep->ss, avp ) );
+@@ -623,7 +633,7 @@ static int create_CER(struct fd_peer * peer, struct cnxctx * cnx, struct msg **
+ 	}
+ 	
+ 	/* Add the information about the local peer */
+-	CHECK_FCT( add_CE_info(*cer, cnx, isi_tls, isi_none) );
++	CHECK_FCT( add_CE_info(*cer, cnx, peer, isi_tls, isi_none) );
+ 	
+ 	/* Done! */
+ 	return 0;
+@@ -657,7 +667,7 @@ static void receiver_reject(struct cnxctx ** recv_cnx, struct msg ** cer, struct
+ 		CHECK_FCT_DO( fd_msg_add_origin ( *cer, 1 ), goto destroy );
+ 	} else {
+ 		/* Add other AVPs to be compliant with the ABNF */
+-		CHECK_FCT_DO( add_CE_info(*cer, *recv_cnx, 0, 0), goto destroy );
++		CHECK_FCT_DO( add_CE_info(*cer, *recv_cnx, NULL, 0, 0), goto destroy );
+ 	}
+ 	CHECK_FCT_DO( fd_out_send(cer, *recv_cnx, NULL, 0), goto destroy );
+ 	
+@@ -1004,7 +1014,7 @@ int fd_p_ce_process_receiver(struct fd_peer * peer)
+ 	/* Reply a CEA */
+ 	CHECK_FCT( fd_msg_new_answer_from_req ( fd_g_config->cnf_dict, &msg, 0 ) );
+ 	CHECK_FCT( fd_msg_rescode_set(msg, "DIAMETER_SUCCESS", NULL, NULL, 0 ) );
+-	CHECK_FCT( add_CE_info(msg, peer->p_cnxctx, isi & PI_SEC_TLS_OLD, isi & PI_SEC_NONE) );
++	CHECK_FCT( add_CE_info(msg, peer->p_cnxctx, peer, isi & PI_SEC_TLS_OLD, isi & PI_SEC_NONE) );
+ 	
+ 	/* The connection is complete, but we may still need TLS handshake */
+ 	fd_hook_call(HOOK_PEER_CONNECT_SUCCESS, msg, peer, NULL, NULL);
+diff --git a/libfdcore/p_cnx.c b/libfdcore/p_cnx.c
+index 009e73d..bc864eb 100644
+--- a/libfdcore/p_cnx.c
++++ b/libfdcore/p_cnx.c
+@@ -121,6 +121,27 @@ static int prepare_connection_list(struct fd_peer * peer)
+ 					AF_INET));
+ 	}
+ 	
++	/* Filter configured outbound SCTP source addresses the same way */
++	if (!FD_IS_LIST_EMPTY(&peer->p_hdr.info.pi_src_endpoints)) {
++		if (peer->p_hdr.info.config.pic_flags.pro3) {
++			CHECK_FCT( fd_ep_filter_family(
++						&peer->p_hdr.info.pi_src_endpoints,
++						(peer->p_hdr.info.config.pic_flags.pro3 == PI_P3_IP) ?
++							AF_INET
++							: AF_INET6));
++		}
++		if (fd_g_config->cnf_flags.no_ip4) {
++			CHECK_FCT( fd_ep_filter_family(
++						&peer->p_hdr.info.pi_src_endpoints,
++						AF_INET6));
++		}
++		if (fd_g_config->cnf_flags.no_ip6) {
++			CHECK_FCT( fd_ep_filter_family(
++						&peer->p_hdr.info.pi_src_endpoints,
++						AF_INET));
++		}
++	}
++	
+ 	/* We don't use the alternate addresses that were sent by the remote peer */
+ 	CHECK_FCT( fd_ep_clearflags(&peer->p_hdr.info.pi_endpoints, EP_FL_ADV) );
+ 	
+@@ -266,10 +287,22 @@ static void * connect_thr(void * arg)
+ 				break;
+ #ifndef DISABLE_SCTP			
+ 			case IPPROTO_SCTP:
+-				cnx = fd_cnx_cli_connect_sctp((peer->p_hdr.info.config.pic_flags.pro3 == PI_P3_IP) ? 1 : fd_g_config->cnf_flags.no_ip6, 
++			{
++				struct fd_list * src_list = NULL;
++				uint16_t src_port = peer->p_hdr.info.config.pic_src_port;
++
++				if (!FD_IS_LIST_EMPTY(&peer->p_hdr.info.pi_src_endpoints)) {
++					/* Per-peer SrcIP overrides global ListenOn for this association */
++					src_list = &peer->p_hdr.info.pi_src_endpoints;
++				} else if (!src_port && !fd_g_config->cnf_flags.no_bind) {
++					src_list = &fd_g_config->cnf_endpoints;
++				}
++
++				cnx = fd_cnx_cli_connect_sctp((peer->p_hdr.info.config.pic_flags.pro3 == PI_P3_IP) ? 1 : fd_g_config->cnf_flags.no_ip6,
+ 							nc->port, &peer->p_hdr.info.pi_endpoints,
+-							fd_g_config->cnf_flags.no_bind ? NULL : &fd_g_config->cnf_endpoints);
++							src_list, src_port);
+ 				break;
++			}
+ #endif /* DISABLE_SCTP */
+ 		}
+ 		
+diff --git a/libfdcore/p_dp.c b/libfdcore/p_dp.c
+index 63f159f..2bb6bfb 100644
+--- a/libfdcore/p_dp.c
++++ b/libfdcore/p_dp.c
+@@ -177,7 +177,7 @@ int fd_p_dp_initiate(struct fd_peer * peer, char * reason)
+ 	CHECK_FCT( fd_msg_new ( fd_dict_cmd_DPR, MSGFL_ALLOC_ETEID, &msg ) );
+ 	
+ 	/* Add the Origin information */
+-	CHECK_FCT( fd_msg_add_origin ( msg, 0 ) );
++	CHECK_FCT( fd_msg_add_origin_peer ( msg, 0, &peer->p_hdr.info ) );
+ 	
+ 	/* Add the Disconnect-Cause */
+ 	CHECK_FCT( fd_msg_avp_new ( fd_dict_avp_DC, 0, &avp ) );
+diff --git a/libfdcore/p_dw.c b/libfdcore/p_dw.c
+index a57e9a9..a5a96e7 100644
+--- a/libfdcore/p_dw.c
++++ b/libfdcore/p_dw.c
+@@ -79,7 +79,7 @@ static int send_DWR(struct fd_peer * peer)
+ 	CHECK_FCT( fd_msg_new ( fd_dict_cmd_DWR, MSGFL_ALLOC_ETEID, &msg ) );
+ 	
+ 	/* Add the content of the message (only the origin) */
+-	CHECK_FCT( fd_msg_add_origin ( msg, 1 ) );
++	CHECK_FCT( fd_msg_add_origin_peer ( msg, 1, &peer->p_hdr.info ) );
+ 	
+         /* Mark the host as having a pending DW */
+         /* We need to set this before sending the message because the
+@@ -108,7 +108,7 @@ int fd_p_dw_handle(struct msg ** msg, int req, struct fd_peer * peer)
+ 		/* If we receive a DWR, send back a DWA */
+ 		CHECK_FCT( fd_msg_new_answer_from_req ( fd_g_config->cnf_dict, msg, 0 ) );
+ 		CHECK_FCT( fd_msg_rescode_set( *msg, "DIAMETER_SUCCESS", NULL, NULL, 0 ) );
+-		CHECK_FCT( fd_msg_add_origin ( *msg, 1 ) );
++		CHECK_FCT( fd_msg_add_origin_peer ( *msg, 1, &peer->p_hdr.info ) );
+ 		CHECK_FCT( fd_out_send( msg, peer->p_cnxctx, peer, 0) );
+ 		
+ 	} else {
+diff --git a/libfdcore/peers.c b/libfdcore/peers.c
+index 00a4fb4..17cfa63 100644
+--- a/libfdcore/peers.c
++++ b/libfdcore/peers.c
+@@ -69,6 +69,7 @@ int fd_peer_alloc(struct fd_peer ** ptr)
+ 	fd_list_init(&p->p_hdr.chain, p);
+ 	
+ 	fd_list_init(&p->p_hdr.info.pi_endpoints, p);
++	fd_list_init(&p->p_hdr.info.pi_src_endpoints, p);
+ 	fd_list_init(&p->p_hdr.info.runtime.pir_apps, p);
+ 	
+ 	p->p_eyec = EYEC_PEER;
+@@ -123,6 +124,12 @@ int fd_peer_add ( struct peer_info * info, const char * orig_dbg, void (*cb)(str
+ 	if (info->config.pic_priority) {
+ 		CHECK_MALLOC( p->p_hdr.info.config.pic_priority = strdup(info->config.pic_priority) );
+ 	}
++	if (info->config.pic_local_host) {
++		CHECK_MALLOC( p->p_hdr.info.config.pic_local_host = strdup(info->config.pic_local_host) );
++	}
++	if (info->config.pic_local_realm) {
++		CHECK_MALLOC( p->p_hdr.info.config.pic_local_realm = strdup(info->config.pic_local_realm) );
++	}
+ 	
+ 	/* Move the list of endpoints into the peer */
+ 	if (info->pi_endpoints.next)
+@@ -132,6 +139,14 @@ int fd_peer_add ( struct peer_info * info, const char * orig_dbg, void (*cb)(str
+ 			fd_list_insert_before(&p->p_hdr.info.pi_endpoints, li);
+ 		}
+ 	
++	/* Move the list of outbound SCTP source endpoints into the peer */
++	if (info->pi_src_endpoints.next)
++		while (!FD_IS_LIST_EMPTY( &info->pi_src_endpoints ) ) {
++			li = info->pi_src_endpoints.next;
++			fd_list_unlink(li);
++			fd_list_insert_before(&p->p_hdr.info.pi_src_endpoints, li);
++		}
++	
+ 	/* The internal data */
+ 	if (orig_dbg) {
+ 		CHECK_MALLOC( p->p_dbgorig = strdup(orig_dbg) );
+@@ -332,6 +347,8 @@ int fd_peer_free(struct fd_peer ** ptr)
+ 	free_null(p->p_hdr.info.pi_diamid);
+ 	
+ 	free_null(p->p_hdr.info.config.pic_realm); 
++	free_null(p->p_hdr.info.config.pic_local_host);
++	free_null(p->p_hdr.info.config.pic_local_realm);
+ 	free_null(p->p_hdr.info.config.pic_priority); 
+ 	
+ 	free_null(p->p_hdr.info.runtime.pir_realm);
+@@ -339,6 +356,7 @@ int fd_peer_free(struct fd_peer ** ptr)
+ 	free_list( &p->p_hdr.info.runtime.pir_apps );
+ 	
+ 	free_list( &p->p_hdr.info.pi_endpoints );
++	free_list( &p->p_hdr.info.pi_src_endpoints );
+ 	
+ 	free_null(p->p_dbgorig);
+ 	
+diff --git a/libfdcore/sctp.c b/libfdcore/sctp.c
+index 1e87628..6cdd4e2 100644
+--- a/libfdcore/sctp.c
++++ b/libfdcore/sctp.c
+@@ -889,7 +889,7 @@ int fd_sctp_listen( int sock )
+ }
+ 
+ /* Create a client socket and connect to remote server */
+-int fd_sctp_client( int *sock, int no_ip6, uint16_t port, struct fd_list * list, struct fd_list * src_list )
++int fd_sctp_client( int *sock, int no_ip6, uint16_t port, struct fd_list * list, struct fd_list * src_list, uint16_t src_port )
+ {
+ 	int family;
+ 	union {
+@@ -903,7 +903,7 @@ int fd_sctp_client( int *sock, int no_ip6, uint16_t port, struct fd_list * list,
+ 	
+ 	sar.buf = NULL;
+ 	
+-	TRACE_ENTRY("%p %i %hu %p %p", sock, no_ip6, port, list, src_list);
++	TRACE_ENTRY("%p %i %hu %p %p %hu", sock, no_ip6, port, list, src_list, src_port);
+ 	CHECK_PARAMS( sock && list && (!FD_IS_LIST_EMPTY(list)) );
+ 	CHECK_PARAMS( !src_list || (src_list && (!FD_IS_LIST_EMPTY(src_list))) );
+ 	
+@@ -922,30 +922,54 @@ int fd_sctp_client( int *sock, int no_ip6, uint16_t port, struct fd_list * list,
+ 	/* Set the socket options */
+ 	CHECK_FCT_DO( ret = fd_setsockopt_prebind(*sock), goto out );
+ 
+-	/* Bind to explicit source addresses if requested */
+-	if (src_list && !FD_IS_LIST_EMPTY(src_list)) {
+-		sSA * bindsar = NULL; /* array of addresses */
+-		size_t sz = 0; /* size of the array */
+-		int sarcount = 0; /* number of sock addr in the array */
++	/* Bind local endpoint(s) before connect when a source port and/or address list is set */
++	if ((src_list && !FD_IS_LIST_EMPTY(src_list)) || src_port) {
++		uint16_t bind_port = src_port ? htons(src_port) : 0;
+ 
+-		/* Create the array of configured addresses */
+-		CHECK_FCT_DO( ret = add_addresses_from_list_mask((void *)&bindsar, &sz, &sarcount, family, 0, src_list, EP_FL_CONF, EP_FL_CONF), goto out );
++		if (src_list && !FD_IS_LIST_EMPTY(src_list)) {
++			sSA * bindsar = NULL; /* array of addresses */
++			size_t sz = 0; /* size of the array */
++			int sarcount = 0; /* number of sock addr in the array */
+ 
+-		if (sarcount) {
+-			char * buf = NULL;
+-			size_t len = 0;
+-			CHECK_MALLOC_DO( fd_sa_dump_array( &buf, &len, 0, bindsar, sarcount), goto out );
+-			LOG_A("SCTP client binding local addresses: %s", buf);
+-			free(buf);
++			/* Create the array of configured addresses */
++			CHECK_FCT_DO( ret = add_addresses_from_list_mask((void *)&bindsar, &sz, &sarcount, family, bind_port, src_list, EP_FL_CONF, EP_FL_CONF), goto out );
+ 
+-			CHECK_SYS_DO( ret = sctp_bindx(*sock, bindsar, sarcount, SCTP_BINDX_ADD_ADDR), goto out );
+-		}
++			if (sarcount) {
++				char * buf = NULL;
++				size_t len = 0;
++				CHECK_MALLOC_DO( fd_sa_dump_array( &buf, &len, 0, bindsar, sarcount), goto out );
++				LOG_A("SCTP client binding local addresses: %s", buf);
++				free(buf);
++
++				CHECK_SYS_DO( ret = sctp_bindx(*sock, bindsar, sarcount, SCTP_BINDX_ADD_ADDR),
++					{ LOG_E("SCTP client sctp_bindx failed: %s", strerror(errno)); goto out; } );
++			}
+ 
+-		/* Disable ASCONF option in postbind */
+-		bind_default = 0;
++			/* Disable ASCONF option in postbind */
++			bind_default = 0;
+ 
+-		/* We don't need bindsar anymore */
+-		free(bindsar);
++			/* We don't need bindsar anymore */
++			free(bindsar);
++		} else {
++			/* Fixed source port only: bind the wildcard local address with that port */
++			union {
++				sSS  ss;
++				sSA  sa;
++				sSA4 sin;
++				sSA6 sin6;
++			} s;
++
++			memset(&s, 0, sizeof(s));
++			s.sa.sa_family = family;
++			if (family == AF_INET)
++				s.sin.sin_port = bind_port;
++			else
++				s.sin6.sin6_port = bind_port;
++
++			CHECK_SYS_DO( ret = bind(*sock, &s.sa, sSAlen(&s.ss)),
++				{ LOG_E("SCTP client bind to port %hu failed: %s", src_port, strerror(errno)); goto out; } );
++			LOG_A("SCTP client bound local port %hu", src_port);
++		}
+ 	}
+ 
+ 	/* Create the array of addresses, add first the configured addresses, then the discovered, then the other ones */
+diff --git a/tests/testcnx.c b/tests/testcnx.c
+index 1c7c230..cf430e5 100644
+--- a/tests/testcnx.c
++++ b/tests/testcnx.c
+@@ -674,7 +674,7 @@ static void * connect_thr(void * arg)
+ #ifndef DISABLE_SCTP
+ 		case IPPROTO_SCTP:
+ 			{
+-				cnx = fd_cnx_cli_connect_sctp(0, TEST_PORT, &eps, NULL);
++				cnx = fd_cnx_cli_connect_sctp(0, TEST_PORT, &eps, NULL, 0);
+ 				CHECK( 1, (cnx ? 1 : 0) ^ cf->expect_failure );
+ 			}
+ 			break;
+diff --git a/tests/testsctp.c b/tests/testsctp.c
+index 40d8729..ca8ab76 100644
+--- a/tests/testsctp.c
++++ b/tests/testsctp.c
+@@ -98,7 +98,7 @@ int main(int argc, char *argv[])
+ 	CHECK( 0, fd_sctp_listen( sock ));
+ 	
+ 	/* Now, create the client socket */
+-	CHECK( 0, fd_sctp_client( &cli.cc_socket, 0, TEST_PORT, &eps, NULL ));
++	CHECK( 0, fd_sctp_client( &cli.cc_socket, 0, TEST_PORT, &eps, NULL, 0 ));
+ 	
+ 	/* Accept this connection */
+ 	srv.cc_socket = accept(sock, NULL, NULL);

@@ -79,7 +79,7 @@ static int send_DWR(struct fd_peer * peer)
 	CHECK_FCT( fd_msg_new ( fd_dict_cmd_DWR, MSGFL_ALLOC_ETEID, &msg ) );
 	
 	/* Add the content of the message (only the origin) */
-	CHECK_FCT( fd_msg_add_origin ( msg, 1 ) );
+	CHECK_FCT( fd_msg_add_origin_peer ( msg, 1, &peer->p_hdr.info ) );
 	
         /* Mark the host as having a pending DW */
         /* We need to set this before sending the message because the
@@ -108,7 +108,7 @@ int fd_p_dw_handle(struct msg ** msg, int req, struct fd_peer * peer)
 		/* If we receive a DWR, send back a DWA */
 		CHECK_FCT( fd_msg_new_answer_from_req ( fd_g_config->cnf_dict, msg, 0 ) );
 		CHECK_FCT( fd_msg_rescode_set( *msg, "DIAMETER_SUCCESS", NULL, NULL, 0 ) );
-		CHECK_FCT( fd_msg_add_origin ( *msg, 1 ) );
+		CHECK_FCT( fd_msg_add_origin_peer ( *msg, 1, &peer->p_hdr.info ) );
 		CHECK_FCT( fd_out_send( msg, peer->p_cnxctx, peer, 0) );
 		
 	} else {
