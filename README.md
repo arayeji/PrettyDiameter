@@ -1,6 +1,6 @@
 # PrettyDiameter
 
-PrettyDiameter is a production-oriented fork of [freeDiameter](https://github.com/freeDiameter/freeDiameter) focused on **Diameter Routing Agent (DRA)** deployments: per-peer SCTP bind and listen modes, safer relay behavior, HTTP route statistics, and operator-ready configuration samples.
+PrettyDiameter is a production-oriented fork of [freeDiameter](https://github.com/freeDiameter/freeDiameter) focused on **Diameter Routing Agent (DRA)** deployments: per-peer SCTP bind and listen modes, safer relay behavior, HTTP route statistics, **configuration changes on the fly** (no full restart), and operator-ready configuration samples.
 
 ## License
 
@@ -15,9 +15,55 @@ This project retains the **freeDiameter BSD license** (see [LICENSE](LICENSE)). 
 | **DRA relay routing fixes** | `LocalHost` no longer treated as global Identity for local delivery / loop detection; answers return to the correct peer |
 | **dra_rtstats** | HTTP UI: per-peer message counters, optional `route_match` reporting, optional `dh_replace` |
 | **dra_peerctl** | HTTP API: list/add/remove peers, export running `ConnectPeer` config — no full restart |
+| **Running config export** | `GET /dump` writes live Identity + all `ConnectPeer` blocks to a file (sync runtime → disk) |
 | **Routing config samples** | Commented `rt_default` snippets: realm routing, DH→MME, IMSI prefix steering |
 | **Hot extension reload** | `SIGUSR1` reloads **extension** config files (e.g. `rt_default` routing rules) without dropping peer links |
 | **PCAP analysis helpers** | Optional Python tools for IMSI / GTP / PFCP correlation in lab troubleshooting |
+
+## Configuration on the fly (without restart)
+
+Most DRA changes that operators do day-to-day **do not require** `systemctl restart` or dropping all Diameter links.
+
+| What you change | How | Other peers stay up? |
+|-----------------|-----|----------------------|
+| **Routing rules** (`dra_rt.conf`) | `kill -USR1 $(pgrep -x freeDiameterd)` | **Yes** |
+| **Add a peer** | `dra_peerctl` `POST /add` or `tools/dra-peerctl.sh add` | **Yes** |
+| **Remove / swap one peer** | `dra_peerctl` `POST /remove` | **Yes** |
+| **Export live config to file** | `GET /dump` or `tools/dra-peerctl.sh dump` | **Yes** (read-only) |
+| **Per-peer listener only** | `fd_peer_listen_start()` / `fd_peer_listen_stop()` | **Yes** |
+
+**Still requires a full restart:** global `Identity`, `Port`, `ListenOn`, TLS certs, `LoadExtension` list, `dra_rtstats.conf` (`route_match`, labels).
+
+### Quick usage
+
+**1. Change routing (most common)**
+
+```bash
+sudo vi /etc/freeDiameter/dra_rt.conf          # edit DR= / DH= / un= rules
+sudo kill -USR1 $(pgrep -x freeDiameterd)      # apply — all peer links stay up
+```
+
+**2. Add or swap a peer (no restart)**
+
+```bash
+tools/dra-peerctl.sh dump /tmp/before.conf     # snapshot live config
+tools/dra-peerctl.sh remove old-peer.example.net
+tools/dra-peerctl.sh add new-peer.snippet.conf
+tools/dra-peerctl.sh list                      # verify STATE_OPEN
+```
+
+**3. Save running config to disk**
+
+The file on disk (`dra.conf`) can drift from what is actually running. Export the **live** state:
+
+```bash
+curl -sf http://127.0.0.1:9069/dump -o /tmp/running-dra.conf
+# Review, then merge ConnectPeer blocks into dra.conf when convenient
+```
+
+Enable `dra_peerctl` once (see [Installation](#installation-production)); default HTTP **`127.0.0.1:9069`**.
+
+Details: [Configuration reload (SIGUSR1)](#configuration-reload-sigusr1), [dra_peerctl](#dra_peerctl-hot-peer-swap), [Operations and usage](#operations-and-usage).
 
 ## Architecture (where this fits)
 
@@ -69,7 +115,7 @@ fd_peer_listen_start(ph);  /* open SrcIP+SrcPort listener(s) */
 fd_peer_listen_stop(ph);   /* close listener(s); outbound link stays up if connected */
 ```
 
-`fd_peer_add()` at runtime (e.g. from a management extension) starts listeners automatically when `Mode` includes server. Editing `ConnectPeer` blocks in `dra.conf` still requires a daemon restart — only the listener sockets can be added/removed hot.
+`fd_peer_add()` at runtime (e.g. via `dra_peerctl`) starts listeners automatically when `Mode` includes server. Editing `ConnectPeer` in `dra.conf` on disk does **not** change running peers until restart — use **`dra_peerctl`** to add/remove live, or **`GET /dump`** to export runtime state back to a file.
 
 ### Relay routing
 
@@ -264,6 +310,8 @@ sudo systemctl restart freediameter-dra.service
 Peer links drop briefly on restart. For routing-only changes use `SIGUSR1` (below). For single-peer changes use `dra_peerctl` (below) without restart.
 
 ## Operations and usage
+
+See [Configuration on the fly](#configuration-on-the-fly-without-restart) for the operator cheat sheet. Expanded detail below.
 
 ### Route statistics (`dra_rtstats`)
 
