@@ -84,6 +84,16 @@ static void http_reply(int fd, int code, const char * ctype, const char * body)
 		send(fd, body, blen, 0);
 }
 
+static const char * peer_mode_label(const struct peer_info * info)
+{
+	switch (info->config.pic_flags.mode) {
+	case PI_MODE_CLIENT: return "client";
+	case PI_MODE_SERVER: return "server";
+	case PI_MODE_BOTH:   return "both";
+	default:             return "auto";
+	}
+}
+
 static char * build_list(void)
 {
 	struct fd_list * li;
@@ -95,14 +105,13 @@ static char * build_list(void)
 
 	CHECK_FCT( pthread_rwlock_rdlock(&fd_g_peers_rw) );
 	for (li = fd_g_peers.next; li != &fd_g_peers; li = li->next) {
-		struct fd_peer * p = (struct fd_peer *)li;
-		int st = fd_peer_getstate(&p->p_hdr);
+		struct peer_hdr * hdr = (struct peer_hdr *)li;
+		int st = fd_peer_get_state(hdr);
 		CHECK_MALLOC_DO( fd_dump_extend(&buf, &len, &off,
-			"%s\t%s\t%s%s\n",
-			p->p_hdr.info.pi_diamid,
+			"%s\t%s\t%s\n",
+			hdr->info.pi_diamid,
 			STATE_STR(st),
-			p->p_flags.pf_listen ? "listen " : "",
-			fd_peer_mode_wants_client(&p->p_hdr.info) ? "client" : "server-only"),
+			peer_mode_label(&hdr->info)),
 			break );
 	}
 	CHECK_FCT( pthread_rwlock_unlock(&fd_g_peers_rw) );
