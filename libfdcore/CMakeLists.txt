@@ -15,6 +15,7 @@ SET(FDCORE_SRC
 	apps.c
 	cnxctx.h
 	config.c
+	conf_export.c
 	core.c
 	cnxctx.c
 	endpoints.c

@@ -349,7 +349,33 @@ static struct server * new_serv( int proto, int secur )
 	return new;
 }
 
-/* Start all the servers */
+/* Stop and destroy one server object (global Port listener or per-peer listener) */
+static void stop_one_server(struct server * s)
+{
+	int i;
+	struct cnxctx * c;
+
+	if (!s)
+		return;
+
+	CHECK_FCT_DO( fd_thr_term(&s->thr), /* continue */ );
+	fd_cnx_destroy(s->conn);
+	s->conn = NULL;
+
+	for (i = 0; i < fd_g_config->cnf_thr_srv; i++)
+		CHECK_FCT_DO( fd_thr_term(&s->workers[i].worker), /* continue */ );
+	free(s->workers);
+	s->workers = NULL;
+
+	while ( fd_fifo_tryget( s->pending, &c ) == 0 )
+		fd_cnx_destroy(c);
+	CHECK_FCT_DO( fd_fifo_del(&s->pending), );
+
+	fd_list_unlink(&s->chain);
+	free(s);
+}
+
+/* Start per-peer listen socket(s) for one ConnectPeer */
 static int fd_peer_listen_start_one(struct fd_peer * peer)
 {
 	struct server * s = NULL;
@@ -388,6 +414,45 @@ static int fd_peer_listen_start_one(struct fd_peer * peer)
 		LOG_N("Per-peer listen: '%s' on TCP port %u", peer->p_hdr.info.pi_diamid, port);
 	}
 
+	peer->p_flags.pf_listen = 1;
+	return 0;
+}
+
+int fd_peer_listen_start(struct peer_hdr * hdr)
+{
+	struct fd_peer * peer = (struct fd_peer *)hdr;
+
+	TRACE_ENTRY("%p", hdr);
+	CHECK_PARAMS(CHECK_PEER(peer));
+
+	if (!fd_peer_mode_wants_server(&peer->p_hdr.info))
+		return EINVAL;
+	if (peer->p_flags.pf_listen)
+		return EALREADY;
+
+	return fd_peer_listen_start_one(peer);
+}
+
+int fd_peer_listen_stop(struct peer_hdr * hdr)
+{
+	struct fd_peer * peer = (struct fd_peer *)hdr;
+	struct fd_list * li, * next;
+
+	TRACE_ENTRY("%p", hdr);
+	CHECK_PARAMS(CHECK_PEER(peer));
+
+	if (!peer->p_flags.pf_listen)
+		return 0;
+
+	for (li = FD_SERVERS.next; li != &FD_SERVERS; li = next) {
+		struct server * s = (struct server *)li;
+		next = li->next;
+		if (s->bound_peer == peer)
+			stop_one_server(s);
+	}
+
+	peer->p_flags.pf_listen = 0;
+	LOG_N("Per-peer listen stopped for '%s'", peer->p_hdr.info.pi_diamid);
 	return 0;
 }
 
@@ -545,34 +610,8 @@ int fd_servers_stop()
 	TRACE_DEBUG(INFO, "Shutting down server sockets...");
 	
 	/* Loop on all servers */
-	while (!FD_IS_LIST_EMPTY(&FD_SERVERS)) {
-		struct server * s = (struct server *)(FD_SERVERS.next);
-		int i;
-		struct cnxctx * c;
-		
-		/* cancel thread */
-		CHECK_FCT_DO( fd_thr_term(&s->thr), /* continue */);
-		
-		/* destroy server connection context */
-		fd_cnx_destroy(s->conn);
-		
-		/* cancel and destroy all worker threads */
-		for (i = 0; i < fd_g_config->cnf_thr_srv; i++) {
-			/* Destroy worker thread */
-			CHECK_FCT_DO( fd_thr_term(&s->workers[i].worker), /* continue */);
-		}
-		free(s->workers);
-		
-		/* Close any pending connection */
-		while ( fd_fifo_tryget( s->pending, &c ) == 0 ) {
-			fd_cnx_destroy(c);
-		}
-		CHECK_FCT_DO( fd_fifo_del(&s->pending), );
-		
-		/* Now destroy the server object */
-		fd_list_unlink(&s->chain);
-		free(s);
-	}
+	while (!FD_IS_LIST_EMPTY(&FD_SERVERS))
+		stop_one_server((struct server *)(FD_SERVERS.next));
 	
 	/* We're done! */
 	return 0;

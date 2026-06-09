@@ -1,0 +1,11 @@
+# Example peer snippet for: dra_peerctl add /path/to/this.file
+# (also accepted as POST body to http://127.0.0.1:9069/add)
+
+DiameterId = "remote-hss.example.net";
+ConnectTo = "203.0.113.10";
+Port = 3868;
+SrcIP = "198.51.100.5";
+SrcPort = 4012;
+Mode = both;
+LocalHost = "dra-link1.example.net";
+No_TLS;

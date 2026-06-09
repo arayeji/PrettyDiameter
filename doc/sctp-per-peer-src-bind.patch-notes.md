@@ -17,6 +17,7 @@ ConnectPeer = "peer.example.com" {
 ```
 
 - **Mode**: `client` (outbound only), `server` (listen on `SrcIP`+`SrcPort` only), `both`, or omit to auto-detect from `ConnectTo` / `SrcIP`+`SrcPort`.
+- **Runtime**: `fd_peer_listen_start()` / `fd_peer_listen_stop()` add or remove listeners without a full daemon restart (outbound links unaffected).
 - **SrcPort**: binds the outbound SCTP client socket to this local port before `sctp_connectx()`, so the kernel association matches wire traffic (no SNAT required). With `Mode = server | both`, also opens a dedicated listener on this port bound to the listed `SrcIP` address(es).
 - **SrcIP**: binds only the listed local address(es) for this peer; overrides global `ListenOn` for that association. Repeat `SrcIP` for legitimate single-port multihoming (several IPs, one `SrcPort`).
 - **Two remote ports**: use two `ConnectPeer` entries (two associations), each with its own `SrcIP`/`SrcPort`/`ConnectTo`/`Port`.

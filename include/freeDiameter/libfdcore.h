@@ -101,6 +101,9 @@ int fd_core_start(void);
 /* Block until the framework has completed its initialization -- useful for extensions */
 int fd_core_waitstartcomplete(void);
 
+/* Non-zero if the daemon is in normal running state (servers and PSMs active) */
+int fd_core_is_running(void);
+
 /* Initialize shutdown of the framework */
 int fd_core_shutdown(void);
 
@@ -384,6 +387,30 @@ extern pthread_rwlock_t fd_g_peers_rw; /* protect the list */
  *    ENOMEM 	: Memory allocation for the new object element failed.)
  */
 int fd_peer_add ( struct peer_info * info, const char * orig_dbg, void (*cb)(struct peer_info *, void *), void * cb_data );
+
+/*
+ * Start or stop dedicated listen sockets for a ConnectPeer (Mode = server | both).
+ * Requires SrcPort and at least one SrcIP. Does not drop an established outbound link.
+ * Call after fd_core_start() — also invoked automatically when fd_peer_add() runs at runtime.
+ */
+int fd_peer_listen_start(struct peer_hdr * peer);
+int fd_peer_listen_stop(struct peer_hdr * peer);
+
+/*
+ * Remove a configured peer (graceful DPR, then free). Other peers are unaffected.
+ * force: if non-zero, abort the PSM when graceful shutdown exceeds DPR_TIMEOUT.
+ */
+int fd_peer_remove(struct peer_hdr * peer, int force);
+int fd_peer_remove_byid(DiamId_t diamid, size_t diamidlen, int igncase, int force);
+
+/*
+ * Export running Identity/Realm/ListenOn and ConnectPeer blocks to a file or stream.
+ */
+int fd_conf_export_running(FILE * out);
+int fd_conf_export_running_path(const char * path);
+
+/* Add a peer from a key=value snippet file (see doc/dra_peer-snippet.sample). */
+int fd_peer_add_from_conf_file(const char * path);
 
 /*
  * FUNCTION:	fd_peer_getbyid

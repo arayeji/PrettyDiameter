@@ -350,8 +350,83 @@ int fd_peer_add ( struct peer_info * info, const char * orig_dbg, void (*cb)(str
 		CHECK_FCT( fd_peer_free(&p) );
 	} else {
 		CHECK_FCT( fd_psm_begin(p) );
+		if (fd_core_is_running() && fd_peer_mode_wants_server(&p->p_hdr.info))
+			CHECK_FCT_DO( fd_peer_listen_start(&p->p_hdr), /* continue */ );
 	}
 	return ret;
+}
+
+/* Wait for peer PSM to reach ZOMBIE, or force abort */
+static int fd_peer_remove_wait(struct fd_peer * peer, int force)
+{
+	struct timespec wait_until, now;
+	int ret = 0;
+
+	CHECK_SYS( clock_gettime(CLOCK_REALTIME, &now) );
+	wait_until.tv_sec  = now.tv_sec + DPR_TIMEOUT + 1;
+	wait_until.tv_nsec = now.tv_nsec;
+
+	while (fd_peer_getstate(&peer->p_hdr) != STATE_ZOMBIE && TS_IS_INFERIOR(&now, &wait_until)) {
+		usleep(100000);
+		CHECK_SYS( clock_gettime(CLOCK_REALTIME, &now) );
+	}
+
+	if (fd_peer_getstate(&peer->p_hdr) != STATE_ZOMBIE) {
+		if (!force)
+			return ETIMEDOUT;
+		TRACE_DEBUG(INFO, "Forcing shutdown of peer '%s'", peer->p_hdr.info.pi_diamid);
+		fd_psm_abord(peer);
+	}
+	return ret;
+}
+
+int fd_peer_remove(struct peer_hdr * hdr, int force)
+{
+	struct fd_peer * peer = (struct fd_peer *)hdr;
+	int st;
+
+	TRACE_ENTRY("%p %d", hdr, force);
+	CHECK_PARAMS(CHECK_PEER(peer));
+
+	fd_peer_listen_stop(hdr);
+
+	st = fd_peer_getstate(hdr);
+	if (st == STATE_ZOMBIE)
+		goto purge;
+
+	CHECK_FCT( fd_psm_terminate(peer, "REMOVED") );
+	CHECK_FCT( fd_peer_remove_wait(peer, force) );
+
+purge:
+	CHECK_POSIX( pthread_rwlock_wrlock(&fd_g_peers_rw) );
+	if (peer->p_hdr.chain.next) {
+		fd_list_unlink(&peer->p_hdr.chain);
+		CHECK_POSIX( pthread_rwlock_unlock(&fd_g_peers_rw) );
+	} else {
+		CHECK_POSIX( pthread_rwlock_unlock(&fd_g_peers_rw) );
+		return ENOENT;
+	}
+
+	if (fd_peer_getstate(hdr) != STATE_ZOMBIE)
+		fd_psm_abord(peer);
+
+	LOG_N("Removed peer '%s'", peer->p_hdr.info.pi_diamid);
+	CHECK_FCT( fd_peer_free(&peer) );
+	return 0;
+}
+
+int fd_peer_remove_byid(DiamId_t diamid, size_t diamidlen, int igncase, int force)
+{
+	struct peer_hdr * hdr = NULL;
+
+	TRACE_ENTRY("%p %zd %d %d", diamid, diamidlen, igncase, force);
+	CHECK_PARAMS(diamid && diamidlen);
+
+	CHECK_FCT( fd_peer_getbyid(diamid, diamidlen, igncase, &hdr) );
+	if (!hdr)
+		return ENOENT;
+
+	return fd_peer_remove(hdr, force);
 }
 
 /* Search for a peer */

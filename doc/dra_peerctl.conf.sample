@@ -1,0 +1,13 @@
+# dra_peerctl — runtime peer management (PrettyDiameter)
+# Load in freeDiameter.conf:
+#   LoadExtension = "/usr/local/lib/freeDiameter/dra_peerctl.fdx" : "/etc/freeDiameter/dra_peerctl.conf";
+
+Port = 9069;
+# Bind = "127.0.0.1";   /* default: localhost only */
+
+# HTTP API (curl examples):
+#   curl -s http://127.0.0.1:9069/list
+#   curl -s http://127.0.0.1:9069/dump -o running-dra-peers.conf
+#   curl -s -X POST 'http://127.0.0.1:9069/remove?peer=peer.example.net'
+#   curl -s -X POST 'http://127.0.0.1:9069/remove?peer=peer.example.net&force=1'
+#   curl -s -X POST --data-binary @doc/dra_peer-snippet.sample http://127.0.0.1:9069/add

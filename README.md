@@ -14,8 +14,9 @@ This project retains the **freeDiameter BSD license** (see [LICENSE](LICENSE)). 
 | **Per-peer listen mode** | `Mode = client \| server \| both` — listen on `SrcIP`+`SrcPort` for inbound peers without using the global `Port` |
 | **DRA relay routing fixes** | `LocalHost` no longer treated as global Identity for local delivery / loop detection; answers return to the correct peer |
 | **dra_rtstats** | HTTP UI: per-peer message counters, optional `route_match` reporting, optional `dh_replace` |
+| **dra_peerctl** | HTTP API: list/add/remove peers, export running `ConnectPeer` config — no full restart |
 | **Routing config samples** | Commented `rt_default` snippets: realm routing, DH→MME, IMSI prefix steering |
-| **Hot routing reload** | `kill -USR1 $(pgrep -x freeDiameterd)` reloads `rt_default` without restarting peers |
+| **Hot extension reload** | `SIGUSR1` reloads **extension** config files (e.g. `rt_default` routing rules) without dropping peer links |
 | **PCAP analysis helpers** | Optional Python tools for IMSI / GTP / PFCP correlation in lab troubleshooting |
 
 ## Architecture (where this fits)
@@ -60,6 +61,16 @@ ConnectPeer = "remote-hss.example.com" {
 
 The global `Port` / `ListenOn` listener is unchanged. Per-peer listeners accept only CERs whose Origin-Host matches the `ConnectPeer` Diameter-Id.
 
+**Runtime listener control** (after `fd_core_start()`, without restarting the daemon):
+
+```c
+struct peer_hdr *ph = ...; /* from fd_peer_getbyid() or fd_peer_add() */
+fd_peer_listen_start(ph);  /* open SrcIP+SrcPort listener(s) */
+fd_peer_listen_stop(ph);   /* close listener(s); outbound link stays up if connected */
+```
+
+`fd_peer_add()` at runtime (e.g. from a management extension) starts listeners automatically when `Mode` includes server. Editing `ConnectPeer` blocks in `dra.conf` still requires a daemon restart — only the listener sockets can be added/removed hot.
+
 ### Relay routing
 
 - **Destination-Host** matching uses **ConnectPeer Diameter-Id** (+100 `FINALDEST`).
@@ -75,15 +86,52 @@ Load as extension; serves HTML on configured `Port` (default 8088). Use for:
 - Verifying `route_match` rules vs actual next-hop peer
 - Optional `dh_replace` before routing-out (rewrite presented DH to real MME peer)
 
-### Routing reload (no peer restart)
+### Configuration reload (SIGUSR1)
 
-After editing `dra_rt.conf` (loaded by `rt_default`):
+**No — not all configs, and not peers.** `SIGUSR1` reloads only extensions that register a reload callback. The main `freeDiameter.conf`, `ConnectPeer` blocks, and peer links are **not** hot-reloadable.
 
 ```bash
 kill -USR1 $(pgrep -x freeDiameterd)
+# or: systemctl kill -s USR1 freediameter-dra.service
 ```
 
-Reloads routing rules only; Diameter peer connections stay up. Changing `ConnectPeer` blocks or the main `dra.conf` still requires a daemon restart.
+| Config | File (typical) | Hot reload? | Notes |
+|--------|----------------|-------------|-------|
+| **Routing rules** | `dra_rt.conf` via `rt_default` | **Yes** | DR/DH/un= scoring; peers stay up |
+| **Route rewrite** | `rt_rewrite.conf` | **Yes** | If extension loaded |
+| **Realm regex routing** | `rt_ereg.conf` | **Yes** | If extension loaded |
+| **ACL whitelist** | `acl_wl.conf` | **Yes** | If extension loaded |
+| **Debug log level** | `dbg_loglevel.conf` | **Yes** | If extension loaded |
+| **Deny by size** | `rt_deny_by_size.conf` | **Yes** | If extension loaded |
+| **dra_rtstats** | `dra_rtstats.conf` | **No** | `route_match`, `dh_replace`, labels — restart required |
+| **Main daemon config** | `dra.conf` | **No** | Identity, Port, ListenOn, TLS, LoadExtension, … |
+| **ConnectPeer / peers** | `dra.conf` | **No** | Edit file on disk — use **dra_peerctl** to apply live |
+| **Per-peer listeners** | runtime API | **Yes** | `fd_peer_listen_start()` / `fd_peer_listen_stop()` |
+| **Peer add/remove/swap** | **dra_peerctl** | **Yes** | `POST /add`, `POST /remove`, `GET /dump` |
+
+Peer connections are unchanged by `SIGUSR1`. A full `systemctl restart` tears down all Diameter links (brief outage). Plan peer or `ConnectPeer` changes in a maintenance window.
+
+The **reload** link on the dra_rtstats HTML page only refreshes the stats view; it does not reload any config file.
+
+### dra_peerctl (hot peer swap)
+
+Load `dra_peerctl.fdx` (default HTTP `127.0.0.1:9069`). Swap one peer without restarting the daemon:
+
+```bash
+# Enable in dra.conf:
+# LoadExtension = "/usr/local/lib/freeDiameter/dra_peerctl.fdx" : "/etc/freeDiameter/dra_peerctl.conf";
+
+tools/dra-peerctl.sh list
+tools/dra-peerctl.sh dump /tmp/running-peers.conf    # save live ConnectPeer blocks
+tools/dra-peerctl.sh remove old-peer.example.net
+tools/dra-peerctl.sh add doc/dra_peer-snippet.sample
+```
+
+Or with curl — see `doc/dra_peerctl.conf.sample`.
+
+**Export (`GET /dump`)** writes Identity, Realm, Port, ListenOn, and every running `ConnectPeer` block (including runtime state comments). Use this to snapshot live config before changes. It does not export `LoadExtension` lines or extension configs (`dra_rt.conf` remains separate — reload with `SIGUSR1`).
+
+**Add** accepts a key=value snippet file (`doc/dra_peer-snippet.sample`). **Remove** sends DPR and waits up to ~16s; use `force=1` if the peer is stuck.
 
 ## Build
 
@@ -102,6 +150,8 @@ Enable extensions in `CMakeLists.txt` / build options as per upstream freeDiamet
 |------|---------|
 | `doc/sctp-per-peer-src-bind.patch-notes.md` | Per-peer SCTP / LocalHost / Mode reference |
 | `doc/dra_rtstats.conf.sample` | HTTP stats and optional `route_match` / `dh_replace` |
+| `doc/dra_peerctl.conf.sample` | Peer control HTTP API |
+| `doc/dra_peer-snippet.sample` | Key=value file for `dra_peerctl add` |
 | `doc/dra_rt-realm-routing.snippet` | Example `DR=` rules for `rt_default` |
 | `doc/dra_rt-dh-mme-routing.snippet` | Example `DH=` rules when HSS wins on realm |
 | `doc/deploy-dra-server.sh` | Generic build/install example |

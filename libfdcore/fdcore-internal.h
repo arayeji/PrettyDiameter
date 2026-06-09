@@ -169,6 +169,7 @@ struct fd_peer { /* The "real" definition of the peer structure */
 		
 		unsigned pf_cnx_pb	: 1;	/* The peer was disconnected because of watchdogs; must exchange 3 watchdogs before putting back to normal */
 		unsigned pf_reopen_cnt	: 2;	/* remaining DW to be exchanged after re-established connection */
+		unsigned pf_listen	: 1;	/* Per-peer SrcIP/SrcPort listener(s) are active */
 		
 	}		 p_flags;
 	
@@ -348,6 +349,8 @@ extern pthread_rwlock_t fd_g_activ_peers_rw; /* protect the list */
 int  fd_servers_start();
 int  fd_servers_stop();
 int  fd_peer_listen_start_all(void);
+int  fd_peer_listen_start(struct peer_hdr * peer);
+int  fd_peer_listen_stop(struct peer_hdr * peer);
 
 int fd_peer_mode_wants_client(const struct peer_info *info);
 int fd_peer_mode_wants_server(const struct peer_info *info);

@@ -282,6 +282,12 @@ int fd_core_waitstartcomplete(void)
 	return core_state_wait(CORE_RUNNING);
 }
 
+int fd_core_is_running(void)
+{
+	enum core_state st = core_state_get();
+	return (st == CORE_RUNNING) || (st == CORE_SHUTDOWN);
+}
+
 /* Start the server & client threads */
 static int fd_core_start_int(void)
 {
