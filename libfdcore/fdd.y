@@ -126,6 +126,10 @@ struct peer_info fddpi;
 %token		SRCIP
 %token		LOCALHOST
 %token		LOCALREALM
+%token		MODE
+%token		PEERMODE_CLIENT
+%token		PEERMODE_SERVER
+%token		PEERMODE_BOTH
 %token		TLS_CRED
 %token		TLS_CA
 %token		TLS_CRL
@@ -640,6 +644,18 @@ peerparams:		/* empty */
 					YYERROR;
 				}
 				fddpi.config.pic_local_realm = $4;
+			}
+			| peerparams MODE '=' PEERMODE_CLIENT ';'
+			{
+				fddpi.config.pic_flags.mode = PI_MODE_CLIENT;
+			}
+			| peerparams MODE '=' PEERMODE_SERVER ';'
+			{
+				fddpi.config.pic_flags.mode = PI_MODE_SERVER;
+			}
+			| peerparams MODE '=' PEERMODE_BOTH ';'
+			{
+				fddpi.config.pic_flags.mode = PI_MODE_BOTH;
 			}
 			| peerparams TCTIMER '=' INTEGER ';'
 			{

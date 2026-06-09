@@ -51,6 +51,7 @@ enum s_state {
 struct server {
 	struct fd_list	chain;		/* link in the FD_SERVERS list */
 
+	struct fd_peer * bound_peer;	/* non-NULL: dedicated ConnectPeer listener */
 	struct cnxctx *	conn;		/* server connection context (listening socket) */
 	int 		proto;		/* IPPROTO_TCP or IPPROTO_SCTP */
 	int 		secur;		/* TLS is started immediately after connection ? 0: no; 1: RFU; 2: yes (TLS/TCP or TLS/SCTP) */
@@ -240,6 +241,18 @@ next_client:
 			fd_hook_call(HOOK_PEER_CONNECT_FAILED, msg, NULL, buf, NULL);
 			goto cleanup;
 		} );
+
+	/* Per-peer listener: accept only the configured remote identity */
+	if (s->bound_peer) {
+		if (fd_peer_cer_match(msg, s->bound_peer) != 0) {
+			char buf[1024];
+			snprintf(buf, sizeof(buf),
+				"CER Origin-Host from '%s' does not match ConnectPeer '%s', connection aborted.",
+				fd_cnx_getid(c), s->bound_peer->p_hdr.info.pi_diamid);
+			fd_hook_call(HOOK_PEER_CONNECT_FAILED, msg, s->bound_peer, buf, NULL);
+			goto cleanup;
+		}
+	}
 	
 	/* Finally, pass the information to the peers module which will handle it in a separate thread */
 	pthread_cleanup_push((void *)fd_cnx_destroy, c);
@@ -337,6 +350,63 @@ static struct server * new_serv( int proto, int secur )
 }
 
 /* Start all the servers */
+static int fd_peer_listen_start_one(struct fd_peer * peer)
+{
+	struct server * s = NULL;
+	uint16_t port = peer->p_hdr.info.config.pic_src_port;
+	struct fd_list * eps = &peer->p_hdr.info.pi_src_endpoints;
+	int sctp_ok = !fd_g_config->cnf_flags.no_sctp
+		&& (peer->p_hdr.info.config.pic_flags.pro4 != PI_P4_TCP);
+	int tcp_ok = !fd_g_config->cnf_flags.no_tcp
+		&& (peer->p_hdr.info.config.pic_flags.pro4 != PI_P4_SCTP);
+
+	TRACE_ENTRY("%p", peer);
+	CHECK_PARAMS(CHECK_PEER(peer) && port && !FD_IS_LIST_EMPTY(eps));
+
+	if (sctp_ok) {
+#ifndef DISABLE_SCTP
+		CHECK_MALLOC( s = new_serv(IPPROTO_SCTP, 0) );
+		s->bound_peer = peer;
+		CHECK_MALLOC( s->conn = fd_cnx_serv_sctp(port, eps) );
+		fd_list_insert_before( &FD_SERVERS, &s->chain );
+		CHECK_POSIX( pthread_create( &s->thr, NULL, serv_th, s ) );
+		LOG_N("Per-peer listen: '%s' on SCTP port %u", peer->p_hdr.info.pi_diamid, port);
+#endif
+	}
+
+	if (tcp_ok) {
+		struct fd_list * li;
+		for (li = eps->next; li != eps; li = li->next) {
+			struct fd_endpoint * ep = (struct fd_endpoint *)li;
+			sSA * sa = &ep->sa;
+			CHECK_MALLOC( s = new_serv(IPPROTO_TCP, 0) );
+			s->bound_peer = peer;
+			CHECK_MALLOC( s->conn = fd_cnx_serv_tcp(port, sa->sa_family, ep) );
+			fd_list_insert_before( &FD_SERVERS, &s->chain );
+			CHECK_POSIX( pthread_create( &s->thr, NULL, serv_th, s ) );
+		}
+		LOG_N("Per-peer listen: '%s' on TCP port %u", peer->p_hdr.info.pi_diamid, port);
+	}
+
+	return 0;
+}
+
+int fd_peer_listen_start_all(void)
+{
+	struct fd_list * li;
+
+	TRACE_ENTRY("");
+
+	CHECK_FCT( pthread_rwlock_rdlock(&fd_g_peers_rw) );
+	for (li = fd_g_peers.next; li != &fd_g_peers; li = li->next) {
+		struct fd_peer * peer = (struct fd_peer *)li;
+		if (fd_peer_mode_wants_server(&peer->p_hdr.info))
+			CHECK_FCT_DO( fd_peer_listen_start_one(peer), /* continue */ );
+	}
+	CHECK_FCT( pthread_rwlock_unlock(&fd_g_peers_rw) );
+	return 0;
+}
+
 int fd_servers_start()
 {
 	struct server * s;

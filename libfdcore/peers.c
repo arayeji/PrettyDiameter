@@ -152,6 +152,83 @@ int fd_realm_is_local( DiamId_t realm, size_t realmlen )
 	return 0;
 }
 
+static void fd_peer_mode_roles(const struct peer_info *info, int *wants_client, int *wants_server)
+{
+	int has_client = !FD_IS_LIST_EMPTY(&info->pi_endpoints);
+	int has_server = (info->config.pic_src_port != 0)
+		&& !FD_IS_LIST_EMPTY(&info->pi_src_endpoints);
+
+	switch (info->config.pic_flags.mode) {
+	case PI_MODE_CLIENT:
+		*wants_client = 1;
+		*wants_server = 0;
+		return;
+	case PI_MODE_SERVER:
+		*wants_client = 0;
+		*wants_server = has_server;
+		return;
+	case PI_MODE_BOTH:
+		*wants_client = has_client;
+		*wants_server = has_server;
+		return;
+	default: /* PI_MODE_AUTO */
+		if (has_client && has_server) {
+			*wants_client = 1;
+			*wants_server = 1;
+		} else if (has_server) {
+			*wants_client = 0;
+			*wants_server = 1;
+		} else {
+			*wants_client = has_client;
+			*wants_server = 0;
+		}
+		return;
+	}
+}
+
+int fd_peer_mode_wants_client(const struct peer_info *info)
+{
+	int wc = 0, ws = 0;
+	CHECK_PARAMS(info);
+	fd_peer_mode_roles(info, &wc, &ws);
+	return wc;
+}
+
+int fd_peer_mode_wants_server(const struct peer_info *info)
+{
+	int wc = 0, ws = 0;
+	CHECK_PARAMS(info);
+	fd_peer_mode_roles(info, &wc, &ws);
+	return ws;
+}
+
+/* Verify CER Origin-Host matches a configured ConnectPeer identity */
+int fd_peer_cer_match(struct msg * cer, struct fd_peer * peer)
+{
+	static struct dict_object * avp_oh_model = NULL;
+	static pthread_mutex_t cache_avp_lock = PTHREAD_MUTEX_INITIALIZER;
+	struct avp * avp_oh = NULL;
+	struct avp_hdr * avp_hdr = NULL;
+	int cmp, cont;
+
+	TRACE_ENTRY("%p %p", cer, peer);
+	CHECK_PARAMS(cer && CHECK_PEER(peer));
+
+	CHECK_POSIX( pthread_mutex_lock(&cache_avp_lock) );
+	if (!avp_oh_model) {
+		avp_code_t code = AC_ORIGIN_HOST;
+		CHECK_FCT_DO( fd_dict_search(fd_g_config->cnf_dict, DICT_AVP, AVP_BY_CODE, &code, &avp_oh_model, ENOENT),
+			{ (void)pthread_mutex_unlock(&cache_avp_lock); return __ret__; } );
+	}
+	CHECK_POSIX( pthread_mutex_unlock(&cache_avp_lock) );
+
+	CHECK_FCT( fd_msg_search_avp(cer, avp_oh_model, &avp_oh) );
+	CHECK_FCT( fd_msg_avp_hdr(avp_oh, &avp_hdr) );
+	cmp = fd_os_almostcasesrch(avp_hdr->avp_value->os.data, avp_hdr->avp_value->os.len,
+			peer->p_hdr.info.pi_diamid, peer->p_hdr.info.pi_diamidlen, &cont);
+	return (cmp == 0) ? 0 : EINVAL;
+}
+
 /* Add a new peer entry */
 int fd_peer_add ( struct peer_info * info, const char * orig_dbg, void (*cb)(struct peer_info *, void *), void * cb_data )
 {
@@ -166,6 +243,27 @@ int fd_peer_add ( struct peer_info * info, const char * orig_dbg, void (*cb)(str
 		if (!fd_os_is_valid_DiameterIdentity((os0_t)info->config.pic_realm, strlen(info->config.pic_realm))) {
 			TRACE_DEBUG(INFO, "'%s' is not a valid DiameterIdentity.", info->config.pic_realm);
 			return EINVAL;
+		}
+	}
+
+	{
+		int wants_client = 0, wants_server = 0;
+		fd_peer_mode_roles(info, &wants_client, &wants_server);
+		if (!wants_client && !wants_server) {
+			/* Inbound-only on global Port/ListenOn (no ConnectTo, no SrcIP+SrcPort). */
+			if (info->config.pic_flags.mode != PI_MODE_AUTO) {
+				TRACE_DEBUG(INFO, "ConnectPeer '%s' Mode conflicts with ConnectTo / SrcIP+SrcPort.", info->pi_diamid);
+				return EINVAL;
+			}
+		} else {
+			if (wants_server && (info->config.pic_src_port == 0 || FD_IS_LIST_EMPTY(&info->pi_src_endpoints))) {
+				TRACE_DEBUG(INFO, "ConnectPeer '%s' server mode requires SrcPort and at least one SrcIP.", info->pi_diamid);
+				return EINVAL;
+			}
+			if (wants_client && FD_IS_LIST_EMPTY(&info->pi_endpoints)) {
+				TRACE_DEBUG(INFO, "ConnectPeer '%s' client mode requires ConnectTo.", info->pi_diamid);
+				return EINVAL;
+			}
 		}
 	}
 	

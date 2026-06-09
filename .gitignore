@@ -20,3 +20,34 @@ fd-deploy.tgz
 
 # Separate lab tooling (not part of PrettyDiameter release)
 tools/iwf-src/
+tools/__pycache__/
+
+# Operator-local deploy/diag scripts (may contain real hostnames/IPs — never commit)
+doc/apply-*-relay.sh
+doc/fix-*-relay.py
+tools/analyze_pcap.py
+tools/analyze_pcap2.py
+tools/apply-return-path.sh
+tools/bisect-dra-rt.sh
+tools/bisect-dra-rt2.sh
+tools/check-dra-*.sh
+tools/check_air_avps.py
+tools/check_imsi_avp.py
+tools/check_imsi_avp2.py
+tools/check_top_avp.py
+tools/check_top_avp_fixed.py
+tools/deploy-clean-dra-rt.sh
+tools/deploy-production-dra-rt.sh
+tools/diag-dra-live.sh
+tools/dra_rt.production.conf
+tools/dump_*.py
+tools/enable-dra-dbg-rt.sh
+tools/find_imsi_raw.py
+tools/git-strip-cursor-trailer.py
+tools/hotfix-*-routing.sh
+tools/install-dra-rt-production.sh
+tools/parse-dra-stats.py
+tools/revert-dra-config.sh
+tools/summarize-*.py
+tools/test-minimal-rt-default.sh
+tools/verify-return-path.sh

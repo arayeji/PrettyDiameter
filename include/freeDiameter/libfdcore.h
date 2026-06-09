@@ -269,6 +269,11 @@ extern const char *peer_state_str[];
 
 #define PI_PRST_NONE	0	/* the peer entry is deleted after disconnection / error */
 #define PI_PRST_ALWAYS	1	/* the peer entry is persistent (will be kept as ZOMBIE in case of error) */
+
+#define PI_MODE_AUTO	0	/* infer from ConnectTo / SrcIP+SrcPort (default) */
+#define PI_MODE_CLIENT	1	/* outbound ConnectTo only */
+#define PI_MODE_SERVER	2	/* listen on SrcIP+SrcPort only */
+#define PI_MODE_BOTH	3	/* outbound and per-peer listen */
 			
 /* Information about a remote peer */
 struct peer_info {
@@ -285,6 +290,7 @@ struct peer_info {
 			unsigned	sctpsec :1;	/* PI_SCTPSEC_* */
 			unsigned	exp :1;		/* PI_EXP_* */
 			unsigned	persist :1;	/* PI_PRST_* */
+			unsigned	mode :2;	/* PI_MODE_* — ConnectPeer client/server/both */
 			
 		}		pic_flags;	/* Flags influencing the connection to the remote peer */
 		

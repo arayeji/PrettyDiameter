@@ -850,10 +850,15 @@ psm_loop:
 				goto psm_loop;
 
 			case STATE_CLOSED:
-				LOG_D("%s: Connecting...", peer->p_hdr.info.pi_diamid);
-				CHECK_FCT_DO( fd_psm_change_state(peer, STATE_WAITCNXACK), goto psm_end );
-				fd_psm_next_timeout(peer, 0, CNX_TIMEOUT);
-				CHECK_FCT_DO( fd_p_cnx_init(peer), goto psm_end );
+				if (fd_peer_mode_wants_client(&peer->p_hdr.info)) {
+					LOG_D("%s: Connecting...", peer->p_hdr.info.pi_diamid);
+					CHECK_FCT_DO( fd_psm_change_state(peer, STATE_WAITCNXACK), goto psm_end );
+					fd_psm_next_timeout(peer, 0, CNX_TIMEOUT);
+					CHECK_FCT_DO( fd_p_cnx_init(peer), goto psm_end );
+				} else {
+					LOG_D("%s: Waiting for inbound connection...", peer->p_hdr.info.pi_diamid);
+					fd_psm_next_timeout(peer, 0, 3600);
+				}
 				goto psm_loop;
 
 			case STATE_SUSPECT:

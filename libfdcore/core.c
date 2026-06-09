@@ -287,6 +287,9 @@ static int fd_core_start_int(void)
 {
 	/* Start server threads */ 
 	CHECK_FCT( fd_servers_start() );
+
+	/* Per-peer listeners (ConnectPeer Mode = server | both) */
+	CHECK_FCT( fd_peer_listen_start_all() );
 	
 	/* Start the peer state machines */
 	CHECK_FCT( fd_psm_start() );

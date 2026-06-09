@@ -8,6 +8,7 @@ ConnectPeer = "peer.example.com" {
     Port = 3868;
     SrcIP = "198.51.100.5";   /* optional, repeatable for multi-address / one port */
     SrcPort = 4012;           /* optional, 1..65535; 0/absent = ephemeral (default) */
+    Mode = client;            /* client | server | both — default: infer from ConnectTo / SrcIP+SrcPort */
     LocalHost = "dra-link1.example.com";  /* optional Origin-Host for this link only */
     LocalRealm = "operator.example.com";  /* optional Origin-Realm; else global Realm */
     No_TLS;
@@ -15,7 +16,8 @@ ConnectPeer = "peer.example.com" {
 };
 ```
 
-- **SrcPort**: binds the outbound SCTP client socket to this local port before `sctp_connectx()`, so the kernel association matches wire traffic (no SNAT required).
+- **Mode**: `client` (outbound only), `server` (listen on `SrcIP`+`SrcPort` only), `both`, or omit to auto-detect from `ConnectTo` / `SrcIP`+`SrcPort`.
+- **SrcPort**: binds the outbound SCTP client socket to this local port before `sctp_connectx()`, so the kernel association matches wire traffic (no SNAT required). With `Mode = server | both`, also opens a dedicated listener on this port bound to the listed `SrcIP` address(es).
 - **SrcIP**: binds only the listed local address(es) for this peer; overrides global `ListenOn` for that association. Repeat `SrcIP` for legitimate single-port multihoming (several IPs, one `SrcPort`).
 - **Two remote ports**: use two `ConnectPeer` entries (two associations), each with its own `SrcIP`/`SrcPort`/`ConnectTo`/`Port`.
 

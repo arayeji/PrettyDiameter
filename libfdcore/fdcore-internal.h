@@ -338,6 +338,8 @@ int fd_p_dp_initiate(struct fd_peer * peer, char * reason);
 int fd_p_dp_newdelay(struct fd_peer * peer);
 
 /* Active peers -- routing process should only ever take the read lock, the write lock is managed by PSMs */
+extern struct fd_list fd_g_peers;
+extern pthread_rwlock_t fd_g_peers_rw;
 extern struct fd_list fd_g_activ_peers;
 extern pthread_rwlock_t fd_g_activ_peers_rw; /* protect the list */
 
@@ -345,6 +347,11 @@ extern pthread_rwlock_t fd_g_activ_peers_rw; /* protect the list */
 /* Server sockets */
 int  fd_servers_start();
 int  fd_servers_stop();
+int  fd_peer_listen_start_all(void);
+
+int fd_peer_mode_wants_client(const struct peer_info *info);
+int fd_peer_mode_wants_server(const struct peer_info *info);
+int fd_peer_cer_match(struct msg * cer, struct fd_peer * peer);
 
 /* Connection contexts -- there are also definitions in cnxctx.h for the relevant files */
 struct cnxctx * fd_cnx_serv_tcp(uint16_t port, int family, struct fd_endpoint * ep);
