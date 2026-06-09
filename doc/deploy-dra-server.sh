@@ -17,5 +17,7 @@ export SRC_ROOT="$SRC"
 bash "$SRC/doc/stage-deploy.sh"
 sudo bash "$SRC/doc/install-as-root.sh"
 
-echo "Add LoadExtension for dra_rtstats in your freeDiameter.conf if needed."
+echo "Add LoadExtension for dra_rtstats and dra_peerctl in your freeDiameter.conf if needed."
+echo "Enable peerctl: sudo bash doc/enable-dra-peerctl.sh /etc/freeDiameter/dra.conf doc/dra_peerctl.conf.sample"
 echo "Stats UI (default): http://<host>:8088/"
+echo "Peer control (default): http://127.0.0.1:9069/ (GET /list, GET /dump)"

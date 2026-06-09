@@ -133,7 +133,227 @@ Or with curl — see `doc/dra_peerctl.conf.sample`.
 
 **Add** accepts a key=value snippet file (`doc/dra_peer-snippet.sample`). **Remove** sends DPR and waits up to ~16s; use `force=1` if the peer is stuck.
 
-## Build
+## Installation (production)
+
+### Prerequisites
+
+| Requirement | Notes |
+|-------------|--------|
+| Linux (x86_64) | Tested on Ubuntu/Debian-style systems |
+| Build tools | `cmake`, `gcc`/`g++`, `make`, `git`, `bison`, `flex` |
+| SCTP | `libsctp-dev` (or distro equivalent) — required by CMake |
+| TLS (optional) | `libgnutls28-dev` if you use Diameter over TLS |
+| Root for install | `cmake --install` writes to `/usr/local` by default |
+
+```bash
+# Debian/Ubuntu example
+sudo apt-get install -y build-essential cmake git bison flex \
+  libsctp-dev libgnutls28-dev
+```
+
+### Clone, build, and install
+
+```bash
+git clone https://github.com/arayeji/PrettyDiameter.git
+cd PrettyDiameter
+mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=MaxPerformance ..
+cmake --build . -j"$(nproc)"
+sudo cmake --install .
+```
+
+This installs:
+
+| Path | Content |
+|------|---------|
+| `/usr/local/bin/freeDiameterd` | Daemon binary |
+| `/usr/local/lib/libfdcore.so*` | Core library (peer modes, export API, …) |
+| `/usr/local/lib/freeDiameter/*.fdx` | Extensions including `dra_rtstats.fdx`, `dra_peerctl.fdx` |
+| `/usr/local/include/freeDiameter/` | Headers |
+
+Quick scripted install (same steps):
+
+```bash
+SRC_ROOT=/path/to/PrettyDiameter bash doc/deploy-dra-server.sh
+```
+
+### systemd service
+
+Create `/etc/systemd/system/freediameter-dra.service`:
+
+```ini
+[Unit]
+Description=freeDiameter DRA
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/freeDiameterd -c /etc/freeDiameter/dra.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now freediameter-dra.service
+sudo systemctl status freediameter-dra.service
+```
+
+### Main configuration (`/etc/freeDiameter/dra.conf`)
+
+Copy your operator `dra.conf` or start from upstream `doc/` samples. Minimum for a DRA relay:
+
+```conf
+Identity = "dra.example.com";
+Realm = "example.com";
+Port = 3868;
+
+ListenOn = "203.0.113.1";
+
+# Dictionaries
+LoadExtension = "/usr/local/lib/freeDiameter/dict_dcca.fdx";
+LoadExtension = "/usr/local/lib/freeDiameter/dict_dcca_3gpp.fdx";
+LoadExtension = "/usr/local/lib/freeDiameter/dict_nasreq.fdx";
+LoadExtension = "/usr/local/lib/freeDiameter/dict_rfc5777.fdx";
+
+# Routing + stats + peer control
+LoadExtension = "/usr/local/lib/freeDiameter/rt_default.fdx" : "/etc/freeDiameter/dra_rt.conf";
+LoadExtension = "/usr/local/lib/freeDiameter/dra_rtstats.fdx" : "/etc/freeDiameter/dra_rtstats.conf";
+LoadExtension = "/usr/local/lib/freeDiameter/dra_peerctl.fdx" : "/etc/freeDiameter/dra_peerctl.conf";
+
+ConnectPeer = "hss.example.net" {
+    ConnectTo = "203.0.113.10";
+    Port = 3868;
+};
+```
+
+Validate syntax before restart (config parse only — do **not** leave this running in foreground on a live node):
+
+```bash
+sudo freeDiameterd -c /etc/freeDiameter/dra.conf &
+sleep 2 && sudo kill $!   # or use your operator's config-check wrapper
+```
+
+### Extension configs
+
+```bash
+sudo install -d /etc/freeDiameter
+sudo install -m 644 doc/dra_rtstats.conf.sample /etc/freeDiameter/dra_rtstats.conf
+sudo install -m 644 doc/dra_peerctl.conf.sample /etc/freeDiameter/dra_peerctl.conf
+# Edit dra_rt.conf routing rules for your network (see doc/*.snippet)
+```
+
+Enable `dra_peerctl` on an existing install:
+
+```bash
+sudo bash doc/enable-dra-peerctl.sh /etc/freeDiameter/dra.conf doc/dra_peerctl.conf.sample
+sudo systemctl restart freediameter-dra.service
+```
+
+### Upgrade (new PrettyDiameter release)
+
+```bash
+cd PrettyDiameter && git pull
+cd build && cmake --build . -j"$(nproc)"
+sudo cmake --install .
+sudo systemctl restart freediameter-dra.service
+```
+
+Peer links drop briefly on restart. For routing-only changes use `SIGUSR1` (below). For single-peer changes use `dra_peerctl` (below) without restart.
+
+## Operations and usage
+
+### Route statistics (`dra_rtstats`)
+
+Default HTTP port **8088** (override in `dra_rtstats.conf`). Open in a browser or curl:
+
+```bash
+curl -s http://127.0.0.1:8088/ | head
+```
+
+Shows per-peer counters, link state, and optional `route_match` / `dh_replace` reporting. Config changes in `dra_rtstats.conf` require a daemon **restart**.
+
+### Export running config (`dra_peerctl`)
+
+The on-disk `dra.conf` can drift from live state (peers added at runtime, listener flags, etc.). **Export what is actually running:**
+
+```bash
+# Helper (from repo checkout)
+tools/dra-peerctl.sh dump /tmp/running-dra.conf
+
+# curl
+curl -sf http://127.0.0.1:9069/dump -o /tmp/running-dra.conf
+
+# List peers + PSM state
+curl -sf http://127.0.0.1:9069/list
+tools/dra-peerctl.sh list
+```
+
+Output includes `Identity`, `Realm`, `Port`, `ListenOn`, and every `ConnectPeer { … }` block with a `# state: …` comment. **Not exported:** `LoadExtension` lines, TLS certs, or extension configs (`dra_rt.conf` — reload separately).
+
+Default bind is **127.0.0.1:9069** (localhost only). Change `Bind` / `Port` in `dra_peerctl.conf` only if you add firewall controls.
+
+### Hot peer swap (no full restart)
+
+Replace one peer while others stay up:
+
+```bash
+# 1. Snapshot current runtime config
+tools/dra-peerctl.sh dump /tmp/before-swap.conf
+
+# 2. Remove old peer (sends DPR, waits ~16s)
+tools/dra-peerctl.sh remove old-peer.example.net
+
+# 3. Add replacement from snippet file
+tools/dra-peerctl.sh add doc/dra_peer-snippet.sample
+
+# 4. Verify
+tools/dra-peerctl.sh list
+tools/dra-peerctl.sh dump /tmp/after-swap.conf
+```
+
+Snippet format (`doc/dra_peer-snippet.sample`):
+
+```conf
+DiameterId = "remote-hss.example.net";
+ConnectTo = "203.0.113.10";
+Port = 3868;
+SrcIP = "198.51.100.5";
+SrcPort = 4012;
+Mode = both;
+LocalHost = "dra-link1.example.net";
+```
+
+If remove times out (peer stuck in closing state):
+
+```bash
+curl -sf -X POST 'http://127.0.0.1:9069/remove?peer=old-peer.example.net&force=1'
+```
+
+### HTTP API reference (`dra_peerctl`)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | Short help |
+| `GET` | `/list` | Tab-separated: Diameter-Id, state, mode |
+| `GET` | `/dump` | Full running config (freeDiameter syntax) |
+| `POST` | `/remove?peer=ID&force=0\|1` | Remove peer by Diameter-Id |
+| `POST` | `/add` | Body = key=value snippet (see sample file) |
+
+### Routing reload (`SIGUSR1`)
+
+See table in [Configuration reload](#configuration-reload-sigusr1) above. Quick reference:
+
+```bash
+sudo kill -USR1 $(pgrep -x freeDiameterd)
+# or: sudo systemctl kill -s USR1 freediameter-dra.service
+```
+
+Reloads `dra_rt.conf` and other extension configs that support hot reload. **Does not** reload `ConnectPeer` blocks — use `dra_peerctl` or restart.
+
+## Build (development)
 
 ```bash
 mkdir build && cd build
@@ -155,6 +375,7 @@ Enable extensions in `CMakeLists.txt` / build options as per upstream freeDiamet
 | `doc/dra_rt-realm-routing.snippet` | Example `DR=` rules for `rt_default` |
 | `doc/dra_rt-dh-mme-routing.snippet` | Example `DH=` rules when HSS wins on realm |
 | `doc/deploy-dra-server.sh` | Generic build/install example |
+| `doc/enable-dra-peerctl.sh` | Add `dra_peerctl` LoadExtension to existing `dra.conf` |
 
 ## PCAP tools (optional)
 

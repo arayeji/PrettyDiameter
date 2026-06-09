@@ -15,4 +15,8 @@ install -d /etc/freeDiameter
 if [ ! -f /etc/freeDiameter/dra_rtstats.conf ]; then
 	install -m 644 "$ST/etc/dra_rtstats.conf" /etc/freeDiameter/
 fi
+if [ ! -f /etc/freeDiameter/dra_peerctl.conf ]; then
+	install -m 644 "$ST/etc/dra_peerctl.conf" /etc/freeDiameter/
+fi
 echo "Installed. Restart your freeDiameter service."
+echo "Enable peerctl in dra.conf: bash doc/enable-dra-peerctl.sh /etc/freeDiameter/dra.conf doc/dra_peerctl.conf.sample"
